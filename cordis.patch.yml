@@ -1,0 +1,4 @@
+# 模型信息补全：从 models.dev 补全自定义模型的上下文 / 输出上限 / 思考 / 图片。
+- insert:
+    - id: model-info-fill
+      name: dsh-model-info-fill

@@ -1,0 +1,59 @@
+{
+  "name": "dsh-model-info-fill",
+  "version": "0.1.1",
+  "description": "模型信息补全：按模型名自动补全上下文、输出上限、思考档位和图片能力",
+  "homepage": "https://github.com/11zld22/dsh-model-info-fill#readme",
+  "bugs": {
+    "url": "https://github.com/11zld22/dsh-model-info-fill/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/11zld22/dsh-model-info-fill.git"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "models.dev"
+  ],
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "test": "node test/catalog.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "dshClient": {
+    "inject": [
+      "@deepseek-ai/dsh-client-runtime",
+      "@deepseek-ai/dsh-client-ui-slots"
+    ],
+    "platform": "web"
+  },
+  "peerDependencies": {
+    "react": "^18.2.0"
+  }
+}
