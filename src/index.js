@@ -5,9 +5,12 @@ import {
   LLM_PI_AI_NS,
   MODELS_DEV_URL,
   buildFillOps,
+  buildModelSaveOps,
   catalogIsStale,
   emptyCatalogFile,
+  listUnmatched,
   parseCatalogFile,
+  parseDefaults,
   parseModelsDev,
 } from './catalog.js'
 
@@ -66,11 +69,21 @@ export function apply(ctx) {
     refreshing: false,
   }
 
+  const currentConfig = () => {
+    try {
+      return ctx.settings.get(LLM_PI_AI_NS)
+    } catch {
+      return { providers: {} }
+    }
+  }
+
   const status = () => ({
     ok: true,
     updatedAt: store.file.updatedAt,
     modelCount: store.file.models.length,
     autoFill: store.file.autoFill !== false,
+    defaults: store.file.defaults,
+    unmatched: listUnmatched(currentConfig(), store.file.models),
     filling: store.filling,
     refreshing: store.refreshing,
   })
@@ -108,6 +121,7 @@ export function apply(ctx) {
         version: 1,
         updatedAt: new Date().toISOString(),
         autoFill: store.file.autoFill !== false,
+        defaults: parseDefaults(store.file.defaults),
         models: parseModelsDev(data),
       }
       await persist()
@@ -126,7 +140,7 @@ export function apply(ctx) {
   const fillSettings = async (onlyProvider) => {
     const settings = ctx.settings
     const config = settings.get(LLM_PI_AI_NS)
-    const { ops, filledProviders } = buildFillOps(config, store.file.models, onlyProvider)
+    const { ops, filledProviders } = buildFillOps(config, store.file.models, onlyProvider, store.file.defaults)
     if (ops.length === 0) {
       return { ok: true, filled: 0, providers: [], skipped: true }
     }
@@ -196,12 +210,7 @@ export function apply(ctx) {
           return
         }
         const file = await refreshCatalog()
-        send(res, 200, {
-          ok: true,
-          updatedAt: file.updatedAt,
-          modelCount: file.models.length,
-          autoFill: file.autoFill !== false,
-        })
+        send(res, 200, status())
       })
     })
 
@@ -214,7 +223,7 @@ export function apply(ctx) {
         const body = await readJsonBody(req).catch(() => ({}))
         const provider = typeof body.provider === 'string' ? body.provider.trim() : ''
         const result = await fillSettings(provider || undefined)
-        send(res, 200, result)
+        send(res, 200, { ...status(), ...result })
       })
     })
 
@@ -225,10 +234,22 @@ export function apply(ctx) {
           return
         }
         const body = await readJsonBody(req).catch(() => ({}))
-        if (typeof body.autoFill === 'boolean') {
-          store.file.autoFill = body.autoFill
-          await persist()
+        if (typeof body.autoFill === 'boolean') store.file.autoFill = body.autoFill
+        if (body.defaults !== undefined) store.file.defaults = parseDefaults(body.defaults)
+        await persist()
+        send(res, 200, status())
+      })
+    })
+
+    route(`${PREFIX}/model`, async (req, res) => {
+      await guard(req, res, async () => {
+        if (req.method !== 'POST') {
+          send(res, 405, { ok: false, error: 'method not allowed' })
+          return
         }
+        const body = await readJsonBody(req)
+        const ops = buildModelSaveOps(currentConfig(), body, store.file.defaults)
+        await ctx.settings.mutate(LLM_PI_AI_NS, ops, llmRevision())
         send(res, 200, status())
       })
     })

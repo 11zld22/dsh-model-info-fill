@@ -11,8 +11,10 @@ window.__ModuleLoader__.load({
 
     const PREFIX = '/plugins/models-dev-catalog'
     const STYLE_ID = 'dsh-model-info-fill'
+    const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
     const CSS = `
+.mdc-wrap { display: flex; flex-direction: column; gap: 8px; width: 100%; }
 .mdc-row {
   display: flex;
   align-items: center;
@@ -48,6 +50,8 @@ window.__ModuleLoader__.load({
   align-items: center;
   gap: 8px;
   flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .mdc-btn {
   box-sizing: border-box;
@@ -99,6 +103,59 @@ window.__ModuleLoader__.load({
 }
 .mdc-card { display: contents; }
 .mdc-error { color: var(--dsw-alias-state-error-primary, #ef4444); }
+.mdc-ok { color: var(--dsw-alias-state-success-primary, #16a34a); }
+.mdc-panel {
+  border: .5px solid var(--dsw-alias-border-l4, rgba(127,127,127,.2));
+  border-radius: 16px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.mdc-block-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-secondary, #888);
+}
+.mdc-grid {
+  display: grid;
+  grid-template-columns: 88px 1fr 88px 1fr;
+  gap: 8px 10px;
+  align-items: center;
+}
+.mdc-label { font-size: 12px; color: var(--dsw-alias-label-secondary, #888); }
+.mdc-input, .mdc-select {
+  box-sizing: border-box;
+  width: 100%;
+  height: 32px;
+  border: .5px solid var(--dsw-alias-border-l3, rgba(127,127,127,.3));
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  padding: 0 8px;
+  font: inherit;
+  font-size: 12px;
+}
+.mdc-levels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.mdc-item {
+  border: .5px solid var(--dsw-alias-border-l4, rgba(127,127,127,.2));
+  border-radius: 12px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mdc-item-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.mdc-item-id { font-size: 13px; font-weight: 500; }
+.mdc-item-sub { font-size: 12px; color: var(--dsw-alias-label-tertiary, #888); }
 `
 
     function pad(value) {
@@ -124,6 +181,14 @@ window.__ModuleLoader__.load({
       return data
     }
 
+    function post(path, body) {
+      return api(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body ?? {}),
+      })
+    }
+
     function isEditButton(button) {
       const text = button.textContent.replace(/\s+/g, '')
       return text === '编辑' || text === 'Edit'
@@ -147,31 +212,168 @@ window.__ModuleLoader__.load({
       }, h('path', { d: 'M4 10a6 6 0 0 1 10.4-4.1L16 4v5h-5l1.7-1.7A4.2 4.2 0 1 0 14.2 13' }))
     }
 
+    function LevelChecks({ value, onChange }) {
+      const selected = Array.isArray(value) ? value : []
+      return h('div', { className: 'mdc-levels' },
+        THINKING_LEVELS.map((level) => h('label', { key: level, className: 'mdc-toggle' },
+          h('input', {
+            type: 'checkbox',
+            checked: selected.includes(level),
+            onChange: (event) => {
+              const next = event.target.checked
+                ? THINKING_LEVELS.filter((item) => item === level || selected.includes(item))
+                : selected.filter((item) => item !== level)
+              onChange(next)
+            },
+          }),
+          level,
+        )),
+      )
+    }
+
+    function DefaultsForm({ defaults, busy, onSave }) {
+      const [draft, setDraft] = useState(defaults)
+      useEffect(() => { setDraft(defaults) }, [defaults])
+      if (!draft) return null
+      return h('div', { className: 'mdc-item' },
+        h('div', { className: 'mdc-block-title' }, '未匹配时的默认值'),
+        h('div', { className: 'mdc-grid' },
+          h('div', { className: 'mdc-label' }, '上下文'),
+          h('input', {
+            className: 'mdc-input',
+            type: 'number',
+            min: 1,
+            value: draft.contextWindow ?? '',
+            onChange: (event) => setDraft({ ...draft, contextWindow: Number(event.target.value) }),
+          }),
+          h('div', { className: 'mdc-label' }, 'maxTokens'),
+          h('input', {
+            className: 'mdc-input',
+            type: 'number',
+            min: 1,
+            value: draft.maxTokens ?? '',
+            onChange: (event) => setDraft({ ...draft, maxTokens: Number(event.target.value) }),
+          }),
+        ),
+        h('label', { className: 'mdc-toggle' },
+          h('input', {
+            type: 'checkbox',
+            checked: draft.image === true,
+            onChange: (event) => setDraft({ ...draft, image: event.target.checked }),
+          }),
+          '支持图片',
+        ),
+        h('div', { className: 'mdc-label' }, '思考强度'),
+        h(LevelChecks, {
+          value: draft.thinkingLevels,
+          onChange: (thinkingLevels) => setDraft({ ...draft, thinkingLevels }),
+        }),
+        h('div', { className: 'mdc-actions' },
+          h('button', {
+            className: 'mdc-btn mdc-btn-inline',
+            type: 'button',
+            disabled: busy,
+            onClick: () => onSave(draft),
+          }, busy ? '保存中…' : '保存默认'),
+        ),
+      )
+    }
+
+    function UnmatchedRow({ item, busy, onSave }) {
+      const [draft, setDraft] = useState(item)
+      useEffect(() => { setDraft(item) }, [item])
+      const levels = Array.isArray(draft.thinkingLevels) ? draft.thinkingLevels : []
+      return h('div', { className: 'mdc-item' },
+        h('div', { className: 'mdc-item-head' },
+          h('div', { className: 'mdc-item-id' }, draft.id),
+          h('div', { className: 'mdc-item-sub' }, `${draft.displayName} · ${draft.provider}`),
+        ),
+        h('div', { className: 'mdc-grid' },
+          h('div', { className: 'mdc-label' }, '上下文'),
+          h('input', {
+            className: 'mdc-input',
+            type: 'number',
+            min: 1,
+            value: draft.contextWindow ?? '',
+            onChange: (event) => setDraft({ ...draft, contextWindow: Number(event.target.value) }),
+          }),
+          h('div', { className: 'mdc-label' }, 'maxTokens'),
+          h('input', {
+            className: 'mdc-input',
+            type: 'number',
+            min: 1,
+            value: draft.maxTokens ?? '',
+            onChange: (event) => setDraft({ ...draft, maxTokens: Number(event.target.value) }),
+          }),
+        ),
+        h('label', { className: 'mdc-toggle' },
+          h('input', {
+            type: 'checkbox',
+            checked: draft.image === true,
+            onChange: (event) => setDraft({ ...draft, image: event.target.checked }),
+          }),
+          '支持图片',
+        ),
+        h('div', { className: 'mdc-label' }, '思考强度'),
+        h(LevelChecks, {
+          value: levels,
+          onChange: (thinkingLevels) => setDraft({ ...draft, thinkingLevels }),
+        }),
+        h('div', { className: 'mdc-grid' },
+          h('div', { className: 'mdc-label' }, '默认档位'),
+          h('select', {
+            className: 'mdc-select',
+            value: draft.providerReasoning || '',
+            onChange: (event) => setDraft({ ...draft, providerReasoning: event.target.value || null }),
+          },
+            h('option', { value: '' }, '不改'),
+            levels.filter((level) => level !== 'off').map((level) => h('option', { key: level, value: level }, level)),
+          ),
+        ),
+        h('div', { className: 'mdc-actions' },
+          h('button', {
+            className: 'mdc-btn mdc-btn-inline',
+            type: 'button',
+            disabled: busy,
+            onClick: () => onSave(draft),
+          }, busy ? '保存中…' : '保存'),
+        ),
+      )
+    }
+
     function Footer() {
       const [state, setState] = useState({
         updatedAt: '',
         modelCount: 0,
         autoFill: true,
+        unmatched: [],
+        defaults: null,
       })
+      const [open, setOpen] = useState(false)
       const [busy, setBusy] = useState('')
       const [error, setError] = useState('')
+      const [hint, setHint] = useState('')
+      const unmatched = Array.isArray(state.unmatched) ? state.unmatched : []
 
       const load = useCallback(async () => {
         const next = await api('/status')
         setState(next)
         setError('')
+        return next
       }, [])
 
       useEffect(() => {
         load().catch((err) => setError(err.message))
       }, [load])
 
-      const run = async (kind, work) => {
+      const run = async (kind, work, okText) => {
         setBusy(kind)
         setError('')
+        setHint('')
         try {
           await work()
           await load()
+          if (okText) setHint(okText)
         } catch (err) {
           setError(err instanceof Error ? err.message : String(err))
         } finally {
@@ -179,47 +381,67 @@ window.__ModuleLoader__.load({
         }
       }
 
-      return h('div', { className: 'mdc-row' },
-        h(RefreshIcon),
-        h('div', { className: 'mdc-body' },
-          h('div', { className: 'mdc-title' }, '模型信息补全'),
-          h('div', { className: 'mdc-desc' },
-            '按模型名补全上下文、输出上限、思考档位和图片能力。',
-            formatStamp(state.updatedAt, state.modelCount),
+      return h('div', { className: 'mdc-wrap' },
+        h('div', { className: 'mdc-row' },
+          h(RefreshIcon),
+          h('div', { className: 'mdc-body' },
+            h('div', { className: 'mdc-title' }, '模型信息补全'),
+            h('div', { className: 'mdc-desc' },
+              '按模型名补全上下文、输出上限、思考档位和图片能力。',
+              formatStamp(state.updatedAt, state.modelCount),
+              unmatched.length ? ` · 未匹配 ${unmatched.length}` : '',
+            ),
+            error ? h('div', { className: 'mdc-desc mdc-error' }, error) : null,
+            hint ? h('div', { className: 'mdc-desc mdc-ok' }, hint) : null,
           ),
-          error ? h('div', { className: 'mdc-desc mdc-error' }, error) : null,
-        ),
-        h('div', { className: 'mdc-actions' },
-          h('label', { className: 'mdc-toggle' },
-            h('input', {
-              type: 'checkbox',
-              checked: state.autoFill !== false,
+          h('div', { className: 'mdc-actions' },
+            h('label', { className: 'mdc-toggle' },
+              h('input', {
+                type: 'checkbox',
+                checked: state.autoFill !== false,
+                disabled: Boolean(busy),
+                onChange: (event) => run('prefs', () => post('/prefs', { autoFill: event.target.checked })),
+              }),
+              '自动补全',
+            ),
+            h('button', {
+              className: 'mdc-btn',
+              type: 'button',
+              onClick: () => setOpen((value) => !value),
+            }, open ? '收起未匹配' : (unmatched.length ? `未匹配 ${unmatched.length}` : '未匹配')),
+            h('button', {
+              className: 'mdc-btn',
+              type: 'button',
               disabled: Boolean(busy),
-              onChange: (event) => run('prefs', () => api('/prefs', {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ autoFill: event.target.checked }),
-              })),
-            }),
-            '自动补全',
+              onClick: () => run('fill', () => post('/fill', {}), '已补全缺失字段'),
+            }, busy === 'fill' ? '补全中…' : '补全全部缺失'),
+            h('button', {
+              className: 'mdc-btn mdc-btn-primary',
+              type: 'button',
+              disabled: Boolean(busy),
+              onClick: () => run('refresh', () => post('/refresh'), '百科已更新'),
+            }, busy === 'refresh' ? '更新中…' : '更新'),
           ),
-          h('button', {
-            className: 'mdc-btn',
-            type: 'button',
-            disabled: Boolean(busy),
-            onClick: () => run('fill', () => api('/fill', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: '{}',
-            })),
-          }, busy === 'fill' ? '补全中…' : '补全全部缺失'),
-          h('button', {
-            className: 'mdc-btn mdc-btn-primary',
-            type: 'button',
-            disabled: Boolean(busy),
-            onClick: () => run('refresh', () => api('/refresh', { method: 'POST' })),
-          }, busy === 'refresh' ? '更新中…' : '更新'),
         ),
+        open ? h('div', { className: 'mdc-panel' },
+          h(DefaultsForm, {
+            defaults: state.defaults,
+            busy: busy === 'defaults',
+            onSave: (defaults) => run('defaults', () => post('/prefs', { defaults }), '默认值已保存'),
+          }),
+          unmatched.length === 0
+            ? h('div', { className: 'mdc-desc' }, '当前没有未匹配的模型。')
+            : unmatched.map((item) => h(UnmatchedRow, {
+              key: `${item.provider}/${item.id}`,
+              item,
+              busy: busy === `model:${item.provider}/${item.id}`,
+              onSave: (draft) => run(
+                `model:${draft.provider}/${draft.id}`,
+                () => post('/model', draft),
+                `已保存 ${draft.id}`,
+              ),
+            })),
+        ) : null,
       )
     }
 
@@ -229,6 +451,15 @@ window.__ModuleLoader__.load({
       const buttonRef = useRef(null)
       const [busy, setBusy] = useState(false)
       const [hint, setHint] = useState('')
+      const [unmatched, setUnmatched] = useState(0)
+
+      useEffect(() => {
+        if (!provider) return
+        api('/status').then((data) => {
+          const list = Array.isArray(data.unmatched) ? data.unmatched : []
+          setUnmatched(list.filter((item) => item.provider === provider).length)
+        }).catch(() => {})
+      }, [provider, hint])
 
       useLayoutEffect(() => {
         const host = hostRef.current
@@ -267,11 +498,11 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setHint('')
         try {
-          const result = await api('/fill', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ provider }),
-          })
+          const result = await post('/fill', { provider })
+          const count = Array.isArray(result.unmatched)
+            ? result.unmatched.filter((item) => item.provider === provider).length
+            : unmatched
+          setUnmatched(count)
           setHint(result.filled ? '已补全缺失字段' : '没有缺失字段')
         } catch (err) {
           setHint(err instanceof Error ? err.message : String(err))
@@ -280,15 +511,21 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const label = busy
+        ? '补全中…'
+        : unmatched
+          ? `补全缺失字段 · ${unmatched}`
+          : '补全缺失字段'
+
       return h('div', { className: 'mdc-card', ref: hostRef },
         h('button', {
           ref: buttonRef,
           className: 'mdc-btn mdc-btn-inline',
           type: 'button',
           disabled: busy,
-          title: hint || '按模型名补全上下文、输出上限、思考档位和图片能力',
+          title: hint || (unmatched ? `${unmatched} 个模型未匹配百科` : '按模型名补全上下文、输出上限、思考档位和图片能力'),
           onClick: fill,
-        }, busy ? '补全中…' : '补全缺失字段'),
+        }, label),
       )
     }
 

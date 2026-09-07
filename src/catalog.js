@@ -28,13 +28,53 @@ export const LLM_PI_AI_NS = 'llm-pi-ai'
 export const STALE_MS = 7 * 24 * 60 * 60 * 1000
 export const PROVIDER_KEY_PATTERN = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/
 
+export function emptyDefaults() {
+  return {
+    contextWindow: DEFAULT_CONTEXT_WINDOW,
+    maxTokens: DEFAULT_MAX_TOKENS,
+    image: false,
+    thinkingLevels: ['off', 'low', 'medium', 'high'],
+    providerReasoning: null,
+  }
+}
+
 export function emptyCatalogFile() {
   return {
     version: 1,
     updatedAt: '',
     autoFill: true,
+    defaults: emptyDefaults(),
     models: [],
   }
+}
+
+export function parseDefaults(raw) {
+  const base = emptyDefaults()
+  const record = asRecord(raw)
+  if (!record) return base
+  if (isPositiveInt(record.contextWindow)) base.contextWindow = record.contextWindow
+  if (isPositiveInt(record.maxTokens)) base.maxTokens = record.maxTokens
+  base.image = record.image === true
+  const levels = sanitizeThinkingLevels(record.thinkingLevels)
+  if (levels.length > 0) base.thinkingLevels = levels
+  const reasoning = typeof record.providerReasoning === 'string' ? record.providerReasoning.trim() : null
+  base.providerReasoning = THINKING_LEVELS.includes(reasoning) ? reasoning : null
+  return base
+}
+
+export function defaultsInput(defaults) {
+  return defaults?.image ? ['text', 'image'] : [...DEFAULT_INPUT]
+}
+
+export function thinkingLevelsFromEfforts(value) {
+  if (value === false || value == null) return []
+  const record = asRecord(value)
+  if (!record) return []
+  return THINKING_LEVELS.filter((level) => {
+    if (!Object.prototype.hasOwnProperty.call(record, level)) return false
+    if (level === 'off') return record[level] === null || typeof record[level] === 'string'
+    return typeof record[level] === 'string' && record[level].length > 0
+  })
 }
 
 export function isPositiveInt(value) {
@@ -153,32 +193,34 @@ function missingReasoning(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0
 }
 
-export function fillModelEntry(entry, models) {
-  if (!entry || typeof entry !== 'object') return { model: entry, changed: false }
+export function fillModelEntry(entry, models, defaults = emptyDefaults()) {
+  if (!entry || typeof entry !== 'object') return { model: entry, changed: false, matched: false }
   const id = typeof entry.id === 'string' ? entry.id.trim() : ''
-  if (!id) return { model: entry, changed: false }
+  if (!id) return { model: entry, changed: false, matched: false }
 
   const next = clonePlain(entry)
   next.id = id
   const hit = lookupCatalogModel(models, id)
+  const matched = Boolean(hit)
   let changed = false
+  const fallback = parseDefaults(defaults)
 
   if (missingCapacity(next.contextWindow)) {
-    next.contextWindow = hit?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
+    next.contextWindow = hit?.contextWindow ?? fallback.contextWindow
     changed = true
   }
   if (missingCapacity(next.maxTokens)) {
-    next.maxTokens = hit?.maxOutput ?? DEFAULT_MAX_TOKENS
+    next.maxTokens = hit?.maxOutput ?? fallback.maxTokens
     changed = true
   }
   if (missingInput(next.input)) {
-    next.input = hit ? sanitizeInput(hit.input) : [...DEFAULT_INPUT]
+    next.input = hit ? sanitizeInput(hit.input) : defaultsInput(fallback)
     changed = true
   }
   if (missingReasoning(next.reasoningEfforts)) {
     next.reasoningEfforts = hit
       ? reasoningEffortsFromLevels(hit.thinkingLevels)
-      : { ...DEFAULT_REASONING_EFFORTS }
+      : reasoningEffortsFromLevels(fallback.thinkingLevels)
     changed = true
   }
   if ((next.name === undefined || next.name === '') && hit?.name) {
@@ -186,10 +228,62 @@ export function fillModelEntry(entry, models) {
     changed = true
   }
 
-  return { model: next, changed }
+  return { model: next, changed, matched }
 }
 
-export function buildFillOps(config, models, onlyProvider) {
+export function listUnmatched(config, models) {
+  const providers = asRecord(config?.providers)
+  if (!providers) return []
+  const unmatched = []
+  for (const [provider, profile] of Object.entries(providers)) {
+    if (!isProviderKey(provider)) continue
+    const record = asRecord(profile)
+    if (!record || !Array.isArray(record.models)) continue
+    const displayName = typeof record.displayName === 'string' && record.displayName.trim()
+      ? record.displayName.trim()
+      : provider
+    const providerReasoning = typeof record.reasoning === 'string' ? record.reasoning : null
+    for (const entry of record.models) {
+      const id = typeof entry?.id === 'string' ? entry.id.trim() : ''
+      if (!id) continue
+      if (lookupCatalogModel(models, id)) continue
+      unmatched.push({
+        provider,
+        displayName,
+        id,
+        name: typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : id,
+        contextWindow: isPositiveInt(entry.contextWindow) ? entry.contextWindow : null,
+        maxTokens: isPositiveInt(entry.maxTokens) ? entry.maxTokens : null,
+        image: Array.isArray(entry.input) && entry.input.includes('image'),
+        thinkingLevels: thinkingLevelsFromEfforts(entry.reasoningEfforts),
+        providerReasoning: THINKING_LEVELS.includes(providerReasoning) ? providerReasoning : null,
+      })
+    }
+  }
+  return unmatched
+}
+
+export function applyModelPatch(entry, patch, defaults = emptyDefaults()) {
+  const fallback = parseDefaults(defaults)
+  const next = clonePlain(entry)
+  const id = typeof next.id === 'string' ? next.id.trim() : ''
+  if (!id) return next
+  next.id = id
+  if (isPositiveInt(patch.contextWindow)) next.contextWindow = patch.contextWindow
+  else if (missingCapacity(next.contextWindow)) next.contextWindow = fallback.contextWindow
+  if (isPositiveInt(patch.maxTokens)) next.maxTokens = patch.maxTokens
+  else if (missingCapacity(next.maxTokens)) next.maxTokens = fallback.maxTokens
+  if (typeof patch.image === 'boolean') next.input = patch.image ? ['text', 'image'] : ['text']
+  else if (missingInput(next.input)) next.input = defaultsInput(fallback)
+  if (Array.isArray(patch.thinkingLevels)) {
+    next.reasoningEfforts = reasoningEffortsFromLevels(patch.thinkingLevels)
+  } else if (missingReasoning(next.reasoningEfforts)) {
+    next.reasoningEfforts = reasoningEffortsFromLevels(fallback.thinkingLevels)
+  }
+  return next
+}
+
+export function buildFillOps(config, models, onlyProvider, defaults = emptyDefaults()) {
   const providers = asRecord(config?.providers)
   if (!providers) return { ops: [], filledProviders: [] }
 
@@ -206,7 +300,7 @@ export function buildFillOps(config, models, onlyProvider) {
 
     let changed = false
     const nextModels = list.map((entry) => {
-      const result = fillModelEntry(entry, models)
+      const result = fillModelEntry(entry, models, defaults)
       if (result.changed) changed = true
       return result.model
     })
@@ -222,6 +316,35 @@ export function buildFillOps(config, models, onlyProvider) {
   return { ops, filledProviders }
 }
 
+export function buildModelSaveOps(config, patch, defaults = emptyDefaults()) {
+  const provider = typeof patch.provider === 'string' ? patch.provider.trim() : ''
+  const id = typeof patch.id === 'string' ? patch.id.trim() : ''
+  if (!isProviderKey(provider) || !id) {
+    throw new Error('provider and model id are required')
+  }
+  const providers = asRecord(config?.providers)
+  const profile = asRecord(providers?.[provider])
+  const list = Array.isArray(profile?.models) ? profile.models : []
+  const index = list.findIndex((entry) => entry?.id === id)
+  if (index < 0) throw new Error(`model "${id}" was not found on ${provider}`)
+
+  const nextModels = list.map((entry, i) => (i === index ? applyModelPatch(entry, patch, defaults) : clonePlain(entry)))
+  const ops = [{
+    op: 'set',
+    path: ['providers', provider, 'models'],
+    value: nextModels,
+  }]
+  const reasoning = typeof patch.providerReasoning === 'string' ? patch.providerReasoning.trim() : null
+  if (reasoning && THINKING_LEVELS.includes(reasoning)) {
+    ops.push({
+      op: 'set',
+      path: ['providers', provider, 'reasoning'],
+      value: reasoning,
+    })
+  }
+  return ops
+}
+
 export function parseCatalogFile(raw) {
   const empty = emptyCatalogFile()
   const record = asRecord(raw)
@@ -231,6 +354,7 @@ export function parseCatalogFile(raw) {
     version: 1,
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : '',
     autoFill: record.autoFill !== false,
+    defaults: parseDefaults(record.defaults),
     models,
   }
 }

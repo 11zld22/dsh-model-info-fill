@@ -8,8 +8,10 @@ import {
   catalogIsStale,
   fillModelEntry,
   formatCatalogStamp,
+  listUnmatched,
   lookupCatalogModel,
   parseCatalogFile,
+  parseDefaults,
   parseModelsDev,
   reasoningEffortsFromLevels,
 } from '../src/catalog.js'
@@ -182,4 +184,48 @@ test('parseCatalogFile and stale detection', () => {
 test('formatCatalogStamp', () => {
   assert.match(formatCatalogStamp('2026-09-06T02:20:57.000Z', 7562), /7562 个模型/)
   assert.equal(formatCatalogStamp('', 0), '尚未更新')
+})
+
+test('fillModelEntry uses custom defaults on catalog miss', () => {
+  const { model, matched } = fillModelEntry({ id: 'unknown-x' }, [], {
+    contextWindow: 111,
+    maxTokens: 222,
+    image: true,
+    thinkingLevels: ['off', 'high'],
+  })
+  assert.equal(matched, false)
+  assert.equal(model.contextWindow, 111)
+  assert.equal(model.maxTokens, 222)
+  assert.deepEqual(model.input, ['text', 'image'])
+  assert.deepEqual(model.reasoningEfforts, { off: null, high: 'high' })
+})
+
+test('listUnmatched only returns ids absent from catalog', () => {
+  const models = parseModelsDev(SAMPLE)
+  const unmatched = listUnmatched({
+    providers: {
+      custom: {
+        displayName: 'Custom',
+        reasoning: 'high',
+        models: [{ id: 'glm-5.2' }, { id: 'mystery', contextWindow: 9, maxTokens: 8, input: ['text', 'image'] }],
+      },
+    },
+  }, models)
+  assert.equal(unmatched.length, 1)
+  assert.equal(unmatched[0].id, 'mystery')
+  assert.equal(unmatched[0].image, true)
+  assert.equal(unmatched[0].providerReasoning, 'high')
+})
+
+test('parseDefaults sanitizes unknown fields', () => {
+  const defaults = parseDefaults({
+    contextWindow: 10,
+    maxTokens: 20,
+    image: true,
+    thinkingLevels: ['nope', 'max'],
+    providerReasoning: 'max',
+  })
+  assert.equal(defaults.contextWindow, 10)
+  assert.deepEqual(defaults.thinkingLevels, ['max'])
+  assert.equal(defaults.providerReasoning, 'max')
 })
