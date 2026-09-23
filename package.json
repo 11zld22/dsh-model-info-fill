@@ -32,7 +32,7 @@
   ],
   "license": "MIT",
   "scripts": {
-    "test": "node test/catalog.test.mjs"
+    "test": "node --test"
   },
   "dsh": {
     "bundle": {

@@ -69,9 +69,19 @@ export function apply(ctx) {
     refreshing: false,
   }
 
+  const readConfig = () => {
+    const settings = ctx.settings
+    if (typeof settings.get === 'function') return settings.get(LLM_PI_AI_NS)
+    const row = settings.describe().find((item) => String(item.ns) === LLM_PI_AI_NS)
+    if (!row || !row.value || typeof row.value !== 'object') {
+      throw new Error(`Settings for ${LLM_PI_AI_NS} are unavailable`)
+    }
+    return row.value
+  }
+
   const currentConfig = () => {
     try {
-      return ctx.settings.get(LLM_PI_AI_NS)
+      return readConfig()
     } catch {
       return { providers: {} }
     }
@@ -139,7 +149,7 @@ export function apply(ctx) {
 
   const fillSettings = async (onlyProvider) => {
     const settings = ctx.settings
-    const config = settings.get(LLM_PI_AI_NS)
+    const config = readConfig()
     const { ops, filledProviders } = buildFillOps(config, store.file.models, onlyProvider, store.file.defaults)
     if (ops.length === 0) {
       return { ok: true, filled: 0, providers: [], skipped: true }
@@ -165,7 +175,10 @@ export function apply(ctx) {
     }, 0)
   }
 
-  ctx.on('settings/updated', (ns) => {
+  const settingsEvent = typeof ctx.settings.get === 'function'
+    ? 'settings/updated'
+    : 'settings/document-updated'
+  ctx.on(settingsEvent, (ns) => {
     if (String(ns) !== LLM_PI_AI_NS) return
     if (store.filling) return
     maybeAutoFill()
@@ -248,7 +261,7 @@ export function apply(ctx) {
           return
         }
         const body = await readJsonBody(req)
-        const ops = buildModelSaveOps(currentConfig(), body, store.file.defaults)
+        const ops = buildModelSaveOps(readConfig(), body, store.file.defaults)
         await ctx.settings.mutate(LLM_PI_AI_NS, ops, llmRevision())
         send(res, 200, status())
       })

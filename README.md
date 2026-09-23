@@ -62,9 +62,12 @@ dsh plugin --profile web add github:11zld22/dsh-model-info-fill
 | 路径 | 内容 |
 |---|---|
 | `~/.dsh/models-dev.json` | 百科缓存、自动补全开关、未匹配默认值 |
-| `~/.dsh/settings.yaml` 的 `llm-pi-ai` | 被补全或手改的模型字段 |
+| DSH 0.1.6：`~/.dsh/settings.yaml` 的 `llm-pi-ai` | 被补全或手改的模型字段 |
+| DSH 0.1.7：当前 profile 的插件配置 | 被补全或手改的模型字段 |
 
 若设置了 `DSH_HOME`，缓存写到 `$DSH_HOME/models-dev.json`。
+
+插件同时支持 DSH 0.1.6 的旧设置接口和 0.1.7 的配置表单接口。升级宿主前请备份整个 `DSH_HOME`；新版宿主会迁移旧设置，不能仅靠降级程序回滚数据。
 
 无缓存或超过 7 天会在启动后后台刷新。拉取失败沿用旧缓存；没有缓存时用默认值，不阻断保存。
 
