@@ -288,6 +288,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'mdc-item-id' }, draft.id),
           h('div', { className: 'mdc-item-sub' }, `${draft.displayName} · ${draft.provider}`),
         ),
+        draft.note ? h('div', { className: 'mdc-desc' }, draft.note) : null,
         h('div', { className: 'mdc-grid' },
           h('div', { className: 'mdc-label' }, '上下文'),
           h('input', {
@@ -347,6 +348,7 @@ window.__ModuleLoader__.load({
         modelCount: 0,
         autoFill: true,
         unmatched: [],
+        thinkingGaps: [],
         defaults: null,
       })
       const [open, setOpen] = useState(false)
@@ -354,6 +356,14 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState('')
       const [hint, setHint] = useState('')
       const unmatched = Array.isArray(state.unmatched) ? state.unmatched : []
+      const thinkingGaps = Array.isArray(state.thinkingGaps) ? state.thinkingGaps : []
+      const detailLabel = unmatched.length && thinkingGaps.length
+        ? `未匹配 ${unmatched.length} · 档位 ${thinkingGaps.length}`
+        : unmatched.length
+          ? `未匹配 ${unmatched.length}`
+          : thinkingGaps.length
+            ? `档位未写明 ${thinkingGaps.length}`
+            : '未匹配'
 
       const load = useCallback(async () => {
         const next = await api('/status')
@@ -390,6 +400,7 @@ window.__ModuleLoader__.load({
               '按模型名补全上下文、输出上限、思考档位和图片能力。',
               formatStamp(state.updatedAt, state.modelCount),
               unmatched.length ? ` · 未匹配 ${unmatched.length}` : '',
+              thinkingGaps.length ? ` · 档位未写明 ${thinkingGaps.length}` : '',
             ),
             error ? h('div', { className: 'mdc-desc mdc-error' }, error) : null,
             hint ? h('div', { className: 'mdc-desc mdc-ok' }, hint) : null,
@@ -408,7 +419,7 @@ window.__ModuleLoader__.load({
               className: 'mdc-btn',
               type: 'button',
               onClick: () => setOpen((value) => !value),
-            }, open ? '收起未匹配' : (unmatched.length ? `未匹配 ${unmatched.length}` : '未匹配')),
+            }, open ? '收起' : detailLabel),
             h('button', {
               className: 'mdc-btn',
               type: 'button',
@@ -429,6 +440,21 @@ window.__ModuleLoader__.load({
             busy: busy === 'defaults',
             onSave: (defaults) => run('defaults', () => post('/prefs', { defaults }), '默认值已保存'),
           }),
+          thinkingGaps.length ? h('div', { className: 'mdc-block-title' }, '档位未写明') : null,
+          thinkingGaps.length ? h('div', { className: 'mdc-desc' },
+            '百科标明这些模型会思考，但没有写出 DSH 能用的离散档位（只有开关、token 预算，或只写了会思考）。不会代填 minimal / low / medium / high。按供应商文档勾选后保存；一个都不勾并保存，表示不会思考。',
+          ) : null,
+          thinkingGaps.map((item) => h(UnmatchedRow, {
+            key: `gap:${item.provider}/${item.id}`,
+            item,
+            busy: busy === `model:${item.provider}/${item.id}`,
+            onSave: (draft) => run(
+              `model:${draft.provider}/${draft.id}`,
+              () => post('/model', draft),
+              `已保存 ${draft.id}`,
+            ),
+          })),
+          unmatched.length || thinkingGaps.length ? h('div', { className: 'mdc-block-title' }, '未匹配百科') : null,
           unmatched.length === 0
             ? h('div', { className: 'mdc-desc' }, '当前没有未匹配的模型。')
             : unmatched.map((item) => h(UnmatchedRow, {
@@ -452,12 +478,15 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(false)
       const [hint, setHint] = useState('')
       const [unmatched, setUnmatched] = useState(0)
+      const [gaps, setGaps] = useState(0)
 
       useEffect(() => {
         if (!provider) return
         api('/status').then((data) => {
           const list = Array.isArray(data.unmatched) ? data.unmatched : []
+          const gapList = Array.isArray(data.thinkingGaps) ? data.thinkingGaps : []
           setUnmatched(list.filter((item) => item.provider === provider).length)
+          setGaps(gapList.filter((item) => item.provider === provider).length)
         }).catch(() => {})
       }, [provider, hint])
 
@@ -503,6 +532,10 @@ window.__ModuleLoader__.load({
             ? result.unmatched.filter((item) => item.provider === provider).length
             : unmatched
           setUnmatched(count)
+          const gapCount = Array.isArray(result.thinkingGaps)
+            ? result.thinkingGaps.filter((item) => item.provider === provider).length
+            : gaps
+          setGaps(gapCount)
           setHint(result.filled ? '已补全缺失字段' : '没有缺失字段')
         } catch (err) {
           setHint(err instanceof Error ? err.message : String(err))
@@ -523,7 +556,10 @@ window.__ModuleLoader__.load({
           className: 'mdc-btn mdc-btn-inline',
           type: 'button',
           disabled: busy,
-          title: hint || (unmatched ? `${unmatched} 个模型未匹配百科` : '按模型名补全上下文、输出上限、思考档位和图片能力'),
+          title: hint || [
+            unmatched ? `${unmatched} 个模型未匹配百科` : '',
+            gaps ? `${gaps} 个模型的思考档位百科未写明` : '',
+          ].filter(Boolean).join('；') || '按模型名补全上下文、输出上限、思考档位和图片能力',
           onClick: fill,
         }, label),
       )

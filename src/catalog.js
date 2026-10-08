@@ -105,18 +105,51 @@ export function sanitizeThinkingLevels(value) {
   return THINKING_LEVELS.filter((level) => value.includes(level))
 }
 
+/** Why a catalog hit states no discrete DSH thinking level. */
+const THINKING_GAP_NOTES = Object.freeze({
+  toggle: '百科只有思考开关，没有分档',
+  budget: '百科按 token 预算控制思考，不是具名档位',
+  'toggle-budget': '百科是思考开关和 token 预算，没有具名档位',
+  unspecified: '百科只标明会思考，没有写出档位',
+})
+
+/**
+ * Discrete thinking levels a models.dev entry actually states.
+ *
+ * DSH treats `reasoningEfforts` as a closed set and refuses an effort the
+ * declaration does not offer. A boolean `reasoning: true`, a `toggle`, or a
+ * `budget_tokens` option affirms reasoning without naming those levels, so
+ * the result is `levels: null` (leave the field unset) rather than a guessed
+ * `minimal/low/medium/high`. An explicit `effort` list is returned as stated.
+ * No reasoning signal at all is an empty list, which fills as `false`.
+ * @param {object} entry
+ * @returns {{ levels: string[] | null, gap: string | null }}
+ */
 function thinkingFromEntry(entry) {
-  const options = entry.reasoning_options
-  if (Array.isArray(options)) {
-    for (const option of options) {
-      const record = asRecord(option)
-      if (record?.type === 'effort' && Array.isArray(record.values)) {
-        return sanitizeThinkingLevels(record.values)
-      }
+  const options = Array.isArray(entry.reasoning_options) ? entry.reasoning_options : []
+  let effortValues = null
+  let hasToggle = false
+  let hasBudget = false
+  for (const option of options) {
+    const record = asRecord(option)
+    if (!record) continue
+    if (record.type === 'effort' && Array.isArray(record.values)) {
+      if (effortValues === null) effortValues = record.values
+    } else if (record.type === 'toggle') {
+      hasToggle = true
+    } else if (record.type === 'budget_tokens') {
+      hasBudget = true
     }
   }
-  if (entry.reasoning === true) return ['minimal', 'low', 'medium', 'high']
-  return []
+  if (effortValues !== null) {
+    return { levels: sanitizeThinkingLevels(effortValues), gap: null }
+  }
+  if (hasToggle || hasBudget) {
+    const gap = hasToggle && hasBudget ? 'toggle-budget' : hasToggle ? 'toggle' : 'budget'
+    return { levels: null, gap }
+  }
+  if (entry.reasoning === true) return { levels: null, gap: 'unspecified' }
+  return { levels: [], gap: null }
 }
 
 export function reasoningEffortsFromLevels(levels) {
@@ -144,6 +177,7 @@ export function parseModelsDev(data) {
       if (!entry || typeof entry.id !== 'string' || !entry.id.trim()) continue
       const limit = asRecord(entry.limit)
       const modalities = asRecord(entry.modalities)
+      const thinking = thinkingFromEntry(entry)
       models.push({
         id: entry.id.trim(),
         name: typeof entry.name === 'string' ? entry.name : entry.id,
@@ -151,7 +185,8 @@ export function parseModelsDev(data) {
         contextWindow: asNumber(limit?.context),
         maxOutput: asNumber(limit?.output),
         input: sanitizeInput(modalities?.input ?? ['text']),
-        thinkingLevels: thinkingFromEntry(entry),
+        thinkingLevels: thinking.levels,
+        thinkingGap: thinking.gap,
       })
     }
   }
@@ -218,10 +253,19 @@ export function fillModelEntry(entry, models, defaults = emptyDefaults()) {
     changed = true
   }
   if (missingReasoning(next.reasoningEfforts)) {
-    next.reasoningEfforts = hit
-      ? reasoningEffortsFromLevels(hit.thinkingLevels)
-      : reasoningEffortsFromLevels(fallback.thinkingLevels)
-    changed = true
+    if (hit && hit.thinkingLevels === null) {
+      // Catalog hit, but no discrete levels to declare. An empty object is
+      // not valid DSH config, so drop it; a missing field stays missing.
+      if (next.reasoningEfforts !== undefined) {
+        delete next.reasoningEfforts
+        changed = true
+      }
+    } else {
+      next.reasoningEfforts = hit
+        ? reasoningEffortsFromLevels(hit.thinkingLevels)
+        : reasoningEffortsFromLevels(fallback.thinkingLevels)
+      changed = true
+    }
   }
   if ((next.name === undefined || next.name === '') && hit?.name) {
     next.name = hit.name
@@ -231,10 +275,10 @@ export function fillModelEntry(entry, models, defaults = emptyDefaults()) {
   return { model: next, changed, matched }
 }
 
-export function listUnmatched(config, models) {
+function configuredModels(config) {
   const providers = asRecord(config?.providers)
   if (!providers) return []
-  const unmatched = []
+  const found = []
   for (const [provider, profile] of Object.entries(providers)) {
     if (!isProviderKey(provider)) continue
     const record = asRecord(profile)
@@ -246,21 +290,46 @@ export function listUnmatched(config, models) {
     for (const entry of record.models) {
       const id = typeof entry?.id === 'string' ? entry.id.trim() : ''
       if (!id) continue
-      if (lookupCatalogModel(models, id)) continue
-      unmatched.push({
-        provider,
-        displayName,
-        id,
-        name: typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : id,
-        contextWindow: isPositiveInt(entry.contextWindow) ? entry.contextWindow : null,
-        maxTokens: isPositiveInt(entry.maxTokens) ? entry.maxTokens : null,
-        image: Array.isArray(entry.input) && entry.input.includes('image'),
-        thinkingLevels: thinkingLevelsFromEfforts(entry.reasoningEfforts),
-        providerReasoning: THINKING_LEVELS.includes(providerReasoning) ? providerReasoning : null,
-      })
+      found.push({ provider, displayName, providerReasoning, id, entry })
     }
   }
-  return unmatched
+  return found
+}
+
+function modelReport(item) {
+  const { entry } = item
+  return {
+    provider: item.provider,
+    displayName: item.displayName,
+    id: item.id,
+    name: typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : item.id,
+    contextWindow: isPositiveInt(entry.contextWindow) ? entry.contextWindow : null,
+    maxTokens: isPositiveInt(entry.maxTokens) ? entry.maxTokens : null,
+    image: Array.isArray(entry.input) && entry.input.includes('image'),
+    thinkingLevels: thinkingLevelsFromEfforts(entry.reasoningEfforts),
+    providerReasoning: THINKING_LEVELS.includes(item.providerReasoning) ? item.providerReasoning : null,
+  }
+}
+
+export function listUnmatched(config, models) {
+  return configuredModels(config)
+    .filter((item) => !lookupCatalogModel(models, item.id))
+    .map(modelReport)
+}
+
+export function listThinkingGaps(config, models) {
+  const gaps = []
+  for (const item of configuredModels(config)) {
+    const hit = lookupCatalogModel(models, item.id)
+    if (!hit || hit.thinkingLevels !== null) continue
+    if (!missingReasoning(item.entry.reasoningEfforts)) continue
+    gaps.push({
+      ...modelReport(item),
+      thinkingGap: typeof hit.thinkingGap === 'string' ? hit.thinkingGap : 'unspecified',
+      note: THINKING_GAP_NOTES[hit.thinkingGap] ?? THINKING_GAP_NOTES.unspecified,
+    })
+  }
+  return gaps
 }
 
 export function applyModelPatch(entry, patch, defaults = emptyDefaults()) {
