@@ -5,6 +5,7 @@ export const MODELS_DEV_URL = 'https://models.dev/api.json'
 export const DEFAULT_CONTEXT_WINDOW = 262144
 export const DEFAULT_MAX_TOKENS = 32768
 export const DEFAULT_INPUT = Object.freeze(['text'])
+export const DEFAULT_PROVIDER_REASONING = 'high'
 
 export const MODALITIES = Object.freeze(['text', 'image'])
 export const THINKING_LEVELS = Object.freeze([
@@ -24,6 +25,9 @@ export const DEFAULT_REASONING_EFFORTS = Object.freeze({
   high: 'high',
 })
 
+/** Cache schema. Bumped when the parsed model shape changes, so an old cache is re-fetched. */
+export const CATALOG_VERSION = 2
+
 export const LLM_PI_AI_NS = 'llm-pi-ai'
 export const STALE_MS = 7 * 24 * 60 * 60 * 1000
 export const PROVIDER_KEY_PATTERN = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/
@@ -34,13 +38,14 @@ export function emptyDefaults() {
     maxTokens: DEFAULT_MAX_TOKENS,
     image: false,
     thinkingLevels: ['off', 'low', 'medium', 'high'],
-    providerReasoning: null,
+    providerReasoning: DEFAULT_PROVIDER_REASONING,
+    providerReasoningStrict: true,
   }
 }
 
 export function emptyCatalogFile() {
   return {
-    version: 1,
+    version: CATALOG_VERSION,
     updatedAt: '',
     autoFill: true,
     defaults: emptyDefaults(),
@@ -58,7 +63,9 @@ export function parseDefaults(raw) {
   const levels = sanitizeThinkingLevels(record.thinkingLevels)
   if (levels.length > 0) base.thinkingLevels = levels
   const reasoning = typeof record.providerReasoning === 'string' ? record.providerReasoning.trim() : null
-  base.providerReasoning = THINKING_LEVELS.includes(reasoning) ? reasoning : null
+  if (record.providerReasoning === null) base.providerReasoning = null
+  else if (reasoning !== null && THINKING_LEVELS.includes(reasoning)) base.providerReasoning = reasoning
+  base.providerReasoningStrict = record.providerReasoningStrict !== false
   return base
 }
 
@@ -75,6 +82,68 @@ export function thinkingLevelsFromEfforts(value) {
     if (level === 'off') return record[level] === null || typeof record[level] === 'string'
     return typeof record[level] === 'string' && record[level].length > 0
   })
+}
+
+/** The levels one model entry accepts at request time, mirroring the adapter's resolution. */
+export function supportedThinkingLevels(entry) {
+  if (entry?.reasoningEfforts === false) return ['off']
+  return thinkingLevelsFromEfforts(entry?.reasoningEfforts)
+}
+
+/**
+ * Whether a provider's default thinking level may be written, so the level never
+ * reaches a model that refuses it: the adapter throws UNSUPPORTED_REASONING_EFFORT
+ * on a profile default its model does not offer.
+ * @param profile - the provider profile being filled.
+ * @param nextModels - the model entries as they will be after this fill.
+ * @param configured - the default level from the plugin's own defaults.
+ * @param strict - write the level only when every model takes it; false writes it anyway.
+ * @returns the wanted level, the level to write (null to leave the profile alone), and the refusing model ids.
+ */
+export function planProviderReasoning(profile, nextModels, configured, strict = true) {
+  const wanted = THINKING_LEVELS.includes(configured) ? configured : null
+  const declared = typeof profile?.reasoning === 'string' ? profile.reasoning.trim() : ''
+  const current = THINKING_LEVELS.includes(declared) ? declared : null
+  if (wanted === null || current !== null) return { wanted, current, level: null, blocked: [] }
+  const blocked = []
+  for (const entry of nextModels) {
+    if (supportedThinkingLevels(entry).includes(wanted)) continue
+    blocked.push(typeof entry?.id === 'string' ? entry.id.trim() : '')
+  }
+  return { wanted, current, level: blocked.length === 0 || strict === false ? wanted : null, blocked }
+}
+
+/**
+ * Read-only view of every provider's default thinking level for the settings panel.
+ * @param config - the resolved llm-pi-ai section.
+ * @param models - the catalog rows.
+ * @param defaults - the plugin's saved defaults.
+ * @returns one row per provider that declares models.
+ */
+export function listProviderReasoning(config, models, defaults = emptyDefaults()) {
+  const providers = asRecord(config?.providers)
+  if (!providers) return []
+  const fallback = parseDefaults(defaults)
+  const rows = []
+  for (const [key, raw] of Object.entries(providers)) {
+    if (!isProviderKey(key)) continue
+    const profile = asRecord(raw)
+    if (!profile || !Array.isArray(profile.models) || profile.models.length === 0) continue
+    const nextModels = profile.models.map((entry) => fillModelEntry(entry, models, fallback).model)
+    const plan = planProviderReasoning(profile, nextModels, fallback.providerReasoning, fallback.providerReasoningStrict)
+    const displayName = typeof profile.displayName === 'string' && profile.displayName.trim()
+      ? profile.displayName.trim()
+      : key
+    rows.push({
+      provider: key,
+      displayName,
+      wanted: plan.wanted,
+      current: plan.current,
+      willSet: plan.level !== null,
+      blocked: plan.blocked,
+    })
+  }
+  return rows
 }
 
 export function isPositiveInt(value) {
@@ -105,18 +174,59 @@ export function sanitizeThinkingLevels(value) {
   return THINKING_LEVELS.filter((level) => value.includes(level))
 }
 
+/** Why a catalog hit states no discrete DSH thinking level. */
+const THINKING_GAP_NOTES = Object.freeze({
+  toggle: '百科只有思考开关，没有分档',
+  budget: '百科按 token 预算控制思考，不是具名档位',
+  'toggle-budget': '百科是思考开关和 token 预算，没有具名档位',
+  unmapped: '百科写的档位名 DSH 不认（例如 none / default），没有别的具名档',
+  unspecified: '百科只标明会思考，没有写出档位',
+})
+
+/** The levels DSH can actually dispatch: off alone declares nothing, so it is not a level set. */
+function usableThinkingLevels(value) {
+  const levels = sanitizeThinkingLevels(value)
+  return levels.some((level) => level !== 'off') ? levels : []
+}
+
+/**
+ * Discrete thinking levels a models.dev entry actually states.
+ *
+ * DSH treats `reasoningEfforts` as a closed set and refuses an effort the
+ * declaration does not offer. A boolean `reasoning: true`, a `toggle`, or a
+ * `budget_tokens` option affirms reasoning without naming those levels, so
+ * the result is `levels: null` (leave the field unset) rather than a guessed
+ * `minimal/low/medium/high`. An explicit `effort` list is returned as stated.
+ * No reasoning signal at all is an empty list, which fills as `false`.
+ * @param {object} entry
+ * @returns {{ levels: string[] | null, gap: string | null }}
+ */
 function thinkingFromEntry(entry) {
-  const options = entry.reasoning_options
-  if (Array.isArray(options)) {
-    for (const option of options) {
-      const record = asRecord(option)
-      if (record?.type === 'effort' && Array.isArray(record.values)) {
-        return sanitizeThinkingLevels(record.values)
-      }
+  const options = Array.isArray(entry.reasoning_options) ? entry.reasoning_options : []
+  let effortValues = null
+  let hasToggle = false
+  let hasBudget = false
+  for (const option of options) {
+    const record = asRecord(option)
+    if (!record) continue
+    if (record.type === 'effort' && Array.isArray(record.values)) {
+      if (effortValues === null) effortValues = record.values
+    } else if (record.type === 'toggle') {
+      hasToggle = true
+    } else if (record.type === 'budget_tokens') {
+      hasBudget = true
     }
   }
-  if (entry.reasoning === true) return ['minimal', 'low', 'medium', 'high']
-  return []
+  if (effortValues !== null) {
+    const levels = usableThinkingLevels(effortValues)
+    return levels.length > 0 ? { levels, gap: null } : { levels: null, gap: 'unmapped' }
+  }
+  if (hasToggle || hasBudget) {
+    const gap = hasToggle && hasBudget ? 'toggle-budget' : hasToggle ? 'toggle' : 'budget'
+    return { levels: null, gap }
+  }
+  if (entry.reasoning === true) return { levels: null, gap: 'unspecified' }
+  return { levels: [], gap: null }
 }
 
 export function reasoningEffortsFromLevels(levels) {
@@ -144,6 +254,7 @@ export function parseModelsDev(data) {
       if (!entry || typeof entry.id !== 'string' || !entry.id.trim()) continue
       const limit = asRecord(entry.limit)
       const modalities = asRecord(entry.modalities)
+      const thinking = thinkingFromEntry(entry)
       models.push({
         id: entry.id.trim(),
         name: typeof entry.name === 'string' ? entry.name : entry.id,
@@ -151,7 +262,8 @@ export function parseModelsDev(data) {
         contextWindow: asNumber(limit?.context),
         maxOutput: asNumber(limit?.output),
         input: sanitizeInput(modalities?.input ?? ['text']),
-        thinkingLevels: thinkingFromEntry(entry),
+        thinkingLevels: thinking.levels,
+        thinkingGap: thinking.gap,
       })
     }
   }
@@ -218,10 +330,21 @@ export function fillModelEntry(entry, models, defaults = emptyDefaults()) {
     changed = true
   }
   if (missingReasoning(next.reasoningEfforts)) {
-    next.reasoningEfforts = hit
-      ? reasoningEffortsFromLevels(hit.thinkingLevels)
-      : reasoningEffortsFromLevels(fallback.thinkingLevels)
-    changed = true
+    // A catalog hit that states no discrete level declares nothing, and an
+    // off-only level set is invalid DSH config. Both leave the field unset: an
+    // empty object would be refused, so drop it and let a missing field stay missing.
+    const value = hit && hit.thinkingLevels === null
+      ? undefined
+      : reasoningEffortsFromLevels(hit ? hit.thinkingLevels : fallback.thinkingLevels)
+    if (value === undefined) {
+      if (next.reasoningEfforts !== undefined) {
+        delete next.reasoningEfforts
+        changed = true
+      }
+    } else {
+      next.reasoningEfforts = value
+      changed = true
+    }
   }
   if ((next.name === undefined || next.name === '') && hit?.name) {
     next.name = hit.name
@@ -231,10 +354,10 @@ export function fillModelEntry(entry, models, defaults = emptyDefaults()) {
   return { model: next, changed, matched }
 }
 
-export function listUnmatched(config, models) {
+function configuredModels(config) {
   const providers = asRecord(config?.providers)
   if (!providers) return []
-  const unmatched = []
+  const found = []
   for (const [provider, profile] of Object.entries(providers)) {
     if (!isProviderKey(provider)) continue
     const record = asRecord(profile)
@@ -246,24 +369,83 @@ export function listUnmatched(config, models) {
     for (const entry of record.models) {
       const id = typeof entry?.id === 'string' ? entry.id.trim() : ''
       if (!id) continue
-      if (lookupCatalogModel(models, id)) continue
-      unmatched.push({
-        provider,
-        displayName,
-        id,
-        name: typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : id,
-        contextWindow: isPositiveInt(entry.contextWindow) ? entry.contextWindow : null,
-        maxTokens: isPositiveInt(entry.maxTokens) ? entry.maxTokens : null,
-        image: Array.isArray(entry.input) && entry.input.includes('image'),
-        thinkingLevels: thinkingLevelsFromEfforts(entry.reasoningEfforts),
-        providerReasoning: THINKING_LEVELS.includes(providerReasoning) ? providerReasoning : null,
-      })
+      found.push({ provider, displayName, providerReasoning, id, entry })
     }
   }
-  return unmatched
+  return found
 }
 
-export function applyModelPatch(entry, patch, defaults = emptyDefaults()) {
+function modelReport(item) {
+  const { entry } = item
+  return {
+    provider: item.provider,
+    displayName: item.displayName,
+    id: item.id,
+    name: typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : item.id,
+    contextWindow: isPositiveInt(entry.contextWindow) ? entry.contextWindow : null,
+    maxTokens: isPositiveInt(entry.maxTokens) ? entry.maxTokens : null,
+    image: Array.isArray(entry.input) && entry.input.includes('image'),
+    thinkingLevels: thinkingLevelsFromEfforts(entry.reasoningEfforts),
+    providerReasoning: THINKING_LEVELS.includes(item.providerReasoning) ? item.providerReasoning : null,
+  }
+}
+
+export function listUnmatched(config, models) {
+  return configuredModels(config)
+    .filter((item) => !lookupCatalogModel(models, item.id))
+    .map(modelReport)
+}
+
+/**
+ * The exact reasoningEfforts this plugin wrote before 0.2.1 for a catalog hit that
+ * states no discrete levels: the invented minimal/low/medium/high. Existing config
+ * is never rewritten, so these entries are reported for the user to confirm.
+ */
+export const LEGACY_FABRICATED_EFFORTS = Object.freeze({
+  off: null,
+  minimal: 'minimal',
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+})
+
+export const LEGACY_GUESS_NOTE = '这四档看起来是旧版本按「会思考」代填的（百科没有写明档位）。确认供应商文档后处理：勾上真正支持的档位保存，或选「保持未声明」清掉。'
+
+export function isLegacyFabricatedEfforts(value) {
+  const record = asRecord(value)
+  if (!record) return false
+  const expected = Object.entries(LEGACY_FABRICATED_EFFORTS)
+  if (Object.keys(record).length !== expected.length) return false
+  return expected.every(([level, wire]) => record[level] === wire)
+}
+
+export function listLegacyThinkingGuesses(config, models) {
+  const guesses = []
+  for (const item of configuredModels(config)) {
+    const hit = lookupCatalogModel(models, item.id)
+    if (!hit || hit.thinkingLevels !== null) continue
+    if (!isLegacyFabricatedEfforts(item.entry.reasoningEfforts)) continue
+    guesses.push({ ...modelReport(item), note: LEGACY_GUESS_NOTE })
+  }
+  return guesses
+}
+
+export function listThinkingGaps(config, models) {
+  const gaps = []
+  for (const item of configuredModels(config)) {
+    const hit = lookupCatalogModel(models, item.id)
+    if (!hit || hit.thinkingLevels !== null) continue
+    if (!missingReasoning(item.entry.reasoningEfforts)) continue
+    gaps.push({
+      ...modelReport(item),
+      thinkingGap: typeof hit.thinkingGap === 'string' ? hit.thinkingGap : 'unspecified',
+      note: THINKING_GAP_NOTES[hit.thinkingGap] ?? THINKING_GAP_NOTES.unspecified,
+    })
+  }
+  return gaps
+}
+
+export function applyModelPatch(entry, patch, defaults = emptyDefaults(), models = []) {
   const fallback = parseDefaults(defaults)
   const next = clonePlain(entry)
   const id = typeof next.id === 'string' ? next.id.trim() : ''
@@ -275,21 +457,45 @@ export function applyModelPatch(entry, patch, defaults = emptyDefaults()) {
   else if (missingCapacity(next.maxTokens)) next.maxTokens = fallback.maxTokens
   if (typeof patch.image === 'boolean') next.input = patch.image ? ['text', 'image'] : ['text']
   else if (missingInput(next.input)) next.input = defaultsInput(fallback)
-  if (Array.isArray(patch.thinkingLevels)) {
+  const mode = typeof patch.thinkingMode === 'string' ? patch.thinkingMode : ''
+  if (mode === 'unset') {
+    // 保持未声明：也清掉旧版本代填的档位。
+    delete next.reasoningEfforts
+  } else if (mode === 'none') {
+    next.reasoningEfforts = false
+  } else if (mode === 'levels') {
+    // An explicit level set. Only a set with a level beyond off is a declaration;
+    // nothing usable checked leaves the field unset rather than asserting false.
+    const levels = Array.isArray(patch.thinkingLevels) ? patch.thinkingLevels : []
+    if (levels.some((level) => level !== 'off' && THINKING_LEVELS.includes(level))) {
+      next.reasoningEfforts = reasoningEffortsFromLevels(levels)
+    } else {
+      delete next.reasoningEfforts
+    }
+  } else if (Array.isArray(patch.thinkingLevels)) {
     next.reasoningEfforts = reasoningEffortsFromLevels(patch.thinkingLevels)
   } else if (missingReasoning(next.reasoningEfforts)) {
-    next.reasoningEfforts = reasoningEffortsFromLevels(fallback.thinkingLevels)
+    // No explicit choice from the caller. A catalog hit that states no discrete
+    // level declares nothing rather than the guessed default level set.
+    const hit = lookupCatalogModel(models, id)
+    const value = hit && hit.thinkingLevels === null
+      ? undefined
+      : reasoningEffortsFromLevels(fallback.thinkingLevels)
+    if (value === undefined) delete next.reasoningEfforts
+    else next.reasoningEfforts = value
   }
   return next
 }
 
 export function buildFillOps(config, models, onlyProvider, defaults = emptyDefaults()) {
   const providers = asRecord(config?.providers)
-  if (!providers) return { ops: [], filledProviders: [] }
+  if (!providers) return { ops: [], filledProviders: [], reasoning: [] }
 
+  const fallback = parseDefaults(defaults)
   const ops = []
   const filledProviders = []
-  const keys = onlyProvider ? [onlyProvider] : Object.keys(providers)
+  const reasoning = []
+  const keys = typeof onlyProvider === 'string' && onlyProvider ? [onlyProvider] : Object.keys(providers)
 
   for (const key of keys) {
     if (!isProviderKey(key)) continue
@@ -300,23 +506,35 @@ export function buildFillOps(config, models, onlyProvider, defaults = emptyDefau
 
     let changed = false
     const nextModels = list.map((entry) => {
-      const result = fillModelEntry(entry, models, defaults)
+      const result = fillModelEntry(entry, models, fallback)
       if (result.changed) changed = true
       return result.model
     })
-    if (!changed) continue
-    ops.push({
-      op: 'set',
-      path: ['providers', key, 'models'],
-      value: nextModels,
-    })
-    filledProviders.push(key)
+    if (changed) {
+      ops.push({
+        op: 'set',
+        path: ['providers', key, 'models'],
+        value: nextModels,
+      })
+    }
+
+    const plan = planProviderReasoning(profile, nextModels, fallback.providerReasoning, fallback.providerReasoningStrict)
+    if (plan.level !== null) {
+      ops.push({
+        op: 'set',
+        path: ['providers', key, 'reasoning'],
+        value: plan.level,
+      })
+    }
+    reasoning.push({ provider: key, ...plan })
+
+    if (changed || plan.level !== null) filledProviders.push(key)
   }
 
-  return { ops, filledProviders }
+  return { ops, filledProviders, reasoning }
 }
 
-export function buildModelSaveOps(config, patch, defaults = emptyDefaults()) {
+export function buildModelSaveOps(config, patch, defaults = emptyDefaults(), models = []) {
   const provider = typeof patch.provider === 'string' ? patch.provider.trim() : ''
   const id = typeof patch.id === 'string' ? patch.id.trim() : ''
   if (!isProviderKey(provider) || !id) {
@@ -328,7 +546,7 @@ export function buildModelSaveOps(config, patch, defaults = emptyDefaults()) {
   const index = list.findIndex((entry) => entry?.id === id)
   if (index < 0) throw new Error(`model "${id}" was not found on ${provider}`)
 
-  const nextModels = list.map((entry, i) => (i === index ? applyModelPatch(entry, patch, defaults) : clonePlain(entry)))
+  const nextModels = list.map((entry, i) => (i === index ? applyModelPatch(entry, patch, defaults, models) : clonePlain(entry)))
   const ops = [{
     op: 'set',
     path: ['providers', provider, 'models'],
@@ -350,9 +568,13 @@ export function parseCatalogFile(raw) {
   const record = asRecord(raw)
   if (!record) return empty
   const models = Array.isArray(record.models) ? record.models.filter((item) => asRecord(item) && typeof item.id === 'string') : []
+  // A cache written by an older parser carries stale derived thinking fields, so
+  // treat it as stale and let the next start refresh itself instead of asking the
+  // user to click 更新. The rows stay usable until that fetch lands.
+  const current = record.version === CATALOG_VERSION
   return {
-    version: 1,
-    updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : '',
+    version: CATALOG_VERSION,
+    updatedAt: current && typeof record.updatedAt === 'string' ? record.updatedAt : '',
     autoFill: record.autoFill !== false,
     defaults: parseDefaults(record.defaults),
     models,
