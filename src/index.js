@@ -7,7 +7,11 @@ import {
   buildFillOps,
   buildModelSaveOps,
   catalogIsStale,
+  CATALOG_VERSION,
   emptyCatalogFile,
+  listLegacyThinkingGuesses,
+  listProviderReasoning,
+  listThinkingGaps,
   listUnmatched,
   parseCatalogFile,
   parseDefaults,
@@ -94,6 +98,9 @@ export function apply(ctx) {
     autoFill: store.file.autoFill !== false,
     defaults: store.file.defaults,
     unmatched: listUnmatched(currentConfig(), store.file.models),
+    thinkingGaps: listThinkingGaps(currentConfig(), store.file.models),
+    legacyThinking: listLegacyThinkingGuesses(currentConfig(), store.file.models),
+    reasoning: listProviderReasoning(currentConfig(), store.file.models, store.file.defaults),
     filling: store.filling,
     refreshing: store.refreshing,
   })
@@ -128,7 +135,7 @@ export function apply(ctx) {
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const data = await response.json()
       store.file = {
-        version: 1,
+        version: CATALOG_VERSION,
         updatedAt: new Date().toISOString(),
         autoFill: store.file.autoFill !== false,
         defaults: parseDefaults(store.file.defaults),
@@ -150,17 +157,17 @@ export function apply(ctx) {
   const fillSettings = async (onlyProvider) => {
     const settings = ctx.settings
     const config = readConfig()
-    const { ops, filledProviders } = buildFillOps(config, store.file.models, onlyProvider, store.file.defaults)
+    const { ops, filledProviders, reasoning } = buildFillOps(config, store.file.models, onlyProvider, store.file.defaults)
     if (ops.length === 0) {
-      return { ok: true, filled: 0, providers: [], skipped: true }
+      return { ok: true, filled: 0, providers: [], reasoning, skipped: true }
     }
     if (store.filling) {
-      return { ok: true, filled: 0, providers: [], skipped: true }
+      return { ok: true, filled: 0, providers: [], reasoning, skipped: true }
     }
     store.filling = true
     try {
       await settings.mutate(LLM_PI_AI_NS, ops, llmRevision())
-      return { ok: true, filled: filledProviders.length, providers: filledProviders }
+      return { ok: true, filled: filledProviders.length, providers: filledProviders, reasoning }
     } finally {
       store.filling = false
     }
@@ -261,7 +268,7 @@ export function apply(ctx) {
           return
         }
         const body = await readJsonBody(req)
-        const ops = buildModelSaveOps(readConfig(), body, store.file.defaults)
+        const ops = buildModelSaveOps(readConfig(), body, store.file.defaults, store.file.models)
         await ctx.settings.mutate(LLM_PI_AI_NS, ops, llmRevision())
         send(res, 200, status())
       })
