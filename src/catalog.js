@@ -270,21 +270,31 @@ export function parseModelsDev(data) {
   return models
 }
 
+/**
+ * The comparable key of a model id: provider prefix and variant suffix removed.
+ *
+ * A variant suffix is not a name. Treating it as one made every id ending in
+ * ":free" compare on the literal "free" and match whichever catalog row happened
+ * to carry that suffix first (a gemma row matched a ling row), which filled the
+ * wrong capacities and mislabelled the level-less hits.
+ * @param {string} id
+ * @returns {string}
+ */
+function catalogKey(id) {
+  const raw = String(id ?? '').trim().toLowerCase()
+  if (!raw) return ''
+  const tail = raw.split('/').filter(Boolean).pop() ?? raw
+  return tail.split(':')[0].trim()
+}
+
 export function lookupCatalogModel(models, id) {
   const raw = String(id ?? '').trim().toLowerCase()
   if (!raw) return undefined
-  const last = raw.split(/[/:]/).filter(Boolean).pop() ?? raw
   const exact = models.find((item) => item.id.toLowerCase() === raw)
   if (exact) return exact
-  if (last !== raw) {
-    const byTail = models.find((item) => item.id.toLowerCase() === last)
-    if (byTail) return byTail
-  }
-  return models.find((item) => {
-    const catalogId = item.id.toLowerCase()
-    const catalogTail = catalogId.split(/[/:]/).filter(Boolean).pop() ?? catalogId
-    return catalogTail === last
-  })
+  const key = catalogKey(raw)
+  if (!key) return undefined
+  return models.find((item) => catalogKey(item.id) === key)
 }
 
 export function clonePlain(value) {
