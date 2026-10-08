@@ -7,7 +7,7 @@ DeepSeek Harness 插件。给自定义供应商里的模型，按名字从 [mode
 - 思考档位 `reasoningEfforts`
 - 图片声明 `input`
 
-百科里没有的模型会套你设的默认值；已经手填过的字段不会覆盖。
+百科里没有的模型会套你设的默认值；已经手填过的字段不会覆盖；百科写不清楚的字段宁可留空 —— 只标明「会思考」而没有离散档位时**不会**替你编出 `minimal` / `low` / `medium` / `high`（见 [档位未写明](#档位未写明)）。
 
 不会根据 models.dev 创建供应商（没有 Base URL / API Key）。百科只用来查模型能力。
 
@@ -17,7 +17,9 @@ DeepSeek Harness 插件。给自定义供应商里的模型，按名字从 [mode
 dsh plugin --profile web add github:11zld22/dsh-model-info-fill
 ```
 
-装完重启 DSH Web。打开 **设置 → 模型** 即可使用。
+装完重启 DSH。桌面版把 `--profile web` 换成 `--profile desktop`。打开 **设置 → 模型** 即可使用。
+
+本机开发时可以 `link` 安装：`dsh plugin --profile desktop add link:F:\path\to\dsh-models-dev-catalog`，改完代码重启 DSH 生效。
 
 ## 怎么用
 
@@ -72,7 +74,9 @@ dsh plugin --profile web add github:11zld22/dsh-model-info-fill
 
 ## 补全规则
 
-匹配顺序（大小写不敏感）：精确 id → 去掉 `provider/` 前缀 → 用 id 尾巴反查。
+匹配顺序（大小写不敏感）：**精确 id** → 去掉 `provider/` 前缀、再去掉 `:变体` 后缀（如 `:free`）后比对模型名（百科一侧同样处理）。
+
+变体后缀本身不算名字：0.2.2 之前是拿 id 按 `/` 和 `:` 拆开后的**最后一段**去比，于是 `xxx:free` 就以字面量 `free` 对上了随便哪条带该后缀的百科行 —— 配置里的 `inclusionai/ling-3.1-flash:free` 会对成 `gemma-4-31b-it:free`，从而写入**别的模型**的上下文 / 输出上限。现在两边都归一化到模型名再比。
 
 | 字段 | 百科命中 | 未命中 |
 |---|---|---|
@@ -100,11 +104,19 @@ dsh plugin --profile web add github:11zld22/dsh-model-info-fill
 
 无缓存或超过 7 天会在启动后后台刷新。缓存结构版本（`version`）变更时，旧缓存也会被当作过期并自动重拉，不需要手动点「更新」。拉取失败沿用旧缓存；没有缓存时用默认值，不阻断保存。
 
+## 更新日志
+
+- **0.2.2**：匹配不再把 `:free` 之类的变体后缀当名字（此前 `xxx:free` 可能对上完全不相干的百科行，写错上下文 / 输出上限）。
+- **0.2.1**：不再给「百科标明会思考但没写离散档位」的模型代填 `minimal` / `low` / `medium` / `high`（只写百科声明的离散档，或在确实无思考信号时写 `false`）；新增「档位未写明」「疑似旧版本代填，请确认」两个区与模型行的思考档位三态；「补全全部缺失」给供应商写默认思考档位（含「严格」开关）；客户端注入名改为 `@deepseek-ai/dsh-client-modules`（DSH 0.2.0 运行时里存在的那个名字）；缓存结构版本变更后自动重拉。
+- **0.2.0**：支持 DSH 0.1.7 的模型设置表单。
+
 ## 开发
 
 ```sh
 npm test
 ```
+
+42 项测试（`node --test`），覆盖百科解析与档位映射、模型匹配（含 `:变体` 后缀）、补全与保存路径、以及旧版本代填值的识别。
 
 ## License
 
