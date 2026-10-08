@@ -4,10 +4,15 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
   DEFAULT_REASONING_EFFORTS,
+  CATALOG_VERSION,
+  applyModelPatch,
   buildFillOps,
   catalogIsStale,
   fillModelEntry,
   formatCatalogStamp,
+  isLegacyFabricatedEfforts,
+  listLegacyThinkingGuesses,
+  listProviderReasoning,
   listThinkingGaps,
   listUnmatched,
   lookupCatalogModel,
@@ -15,6 +20,7 @@ import {
   parseDefaults,
   parseModelsDev,
   reasoningEffortsFromLevels,
+  supportedThinkingLevels,
 } from '../src/catalog.js'
 
 const SAMPLE = {
@@ -386,6 +392,98 @@ test('listUnmatched only returns ids absent from catalog', () => {
   assert.equal(unmatched[0].providerReasoning, 'high')
 })
 
+test('parseDefaults keeps the built-in default level and honours 不改', () => {
+  assert.equal(parseDefaults({}).providerReasoning, 'high')
+  assert.equal(parseDefaults({ providerReasoning: null }).providerReasoning, null)
+  assert.equal(parseDefaults({ providerReasoning: 'low' }).providerReasoning, 'low')
+  assert.equal(parseDefaults({ providerReasoning: 'bogus' }).providerReasoning, 'high')
+  assert.equal(parseDefaults({}).providerReasoningStrict, true)
+  assert.equal(parseDefaults({ providerReasoningStrict: false }).providerReasoningStrict, false)
+  assert.equal(parseDefaults({ providerReasoningStrict: 'yes' }).providerReasoningStrict, true)
+})
+
+test('buildFillOps can force the level when 严格 is off', () => {
+  const entry = { id: 'no-high', contextWindow: 1, maxTokens: 1, input: ['text'], reasoningEfforts: { off: null, low: 'low' } }
+  const { ops, reasoning } = buildFillOps({ providers: { custom: { models: [entry] } } }, [], undefined, {
+    providerReasoning: 'high',
+    providerReasoningStrict: false,
+  })
+  assert.deepEqual(ops, [{ op: 'set', path: ['providers', 'custom', 'reasoning'], value: 'high' }])
+  assert.deepEqual(reasoning, [{ provider: 'custom', wanted: 'high', current: null, level: 'high', blocked: ['no-high'] }])
+})
+
+test('supportedThinkingLevels mirrors the adapter resolution', () => {
+  assert.deepEqual(supportedThinkingLevels({ reasoningEfforts: false }), ['off'])
+  assert.deepEqual(supportedThinkingLevels({ reasoningEfforts: { off: null, low: 'low', high: 'high' } }), ['off', 'low', 'high'])
+  assert.deepEqual(supportedThinkingLevels({ reasoningEfforts: { low: 'low', high: 'high', max: 'max' } }), ['low', 'high', 'max'])
+  assert.deepEqual(supportedThinkingLevels({ reasoningEfforts: { off: null, low: null } }), ['off'])
+  assert.deepEqual(supportedThinkingLevels({}), [])
+})
+
+test('buildFillOps writes the provider default level when every model takes it', () => {
+  const models = parseModelsDev(SAMPLE)
+  const { ops, filledProviders, reasoning } = buildFillOps({
+    providers: {
+      custom: {
+        models: [
+          { id: 'glm-5.2' },
+          { id: 'listed', contextWindow: 1, maxTokens: 1, input: ['text'], reasoningEfforts: { off: null, high: 'high' } },
+        ],
+      },
+    },
+  }, models)
+  assert.deepEqual(filledProviders, ['custom'])
+  assert.deepEqual(ops.map((op) => op.path.join('.')), ['providers.custom.models', 'providers.custom.reasoning'])
+  assert.equal(ops[1].value, 'high')
+  assert.deepEqual(reasoning, [{ provider: 'custom', wanted: 'high', current: null, level: 'high', blocked: [] }])
+})
+
+test('buildFillOps skips the default level when a model refuses it', () => {
+  const entry = { id: 'no-high', contextWindow: 1, maxTokens: 1, input: ['text'], reasoningEfforts: { off: null, low: 'low' } }
+  const { ops, filledProviders, reasoning } = buildFillOps({ providers: { custom: { models: [entry] } } }, [], undefined, { providerReasoning: 'high' })
+  assert.deepEqual(ops, [])
+  assert.deepEqual(filledProviders, [])
+  assert.deepEqual(reasoning, [{ provider: 'custom', wanted: 'high', current: null, level: null, blocked: ['no-high'] }])
+})
+
+test('buildFillOps leaves an already set provider level alone', () => {
+  const entry = { id: 'm', contextWindow: 1, maxTokens: 1, input: ['text'], reasoningEfforts: { off: null, high: 'high' } }
+  const { ops, reasoning } = buildFillOps({ providers: { custom: { reasoning: 'low', models: [entry] } } }, [], undefined, { providerReasoning: 'high' })
+  assert.deepEqual(ops, [])
+  assert.deepEqual(reasoning, [{ provider: 'custom', wanted: 'high', current: 'low', level: null, blocked: [] }])
+})
+
+test('buildFillOps writes no level when the default is 不改', () => {
+  const entry = { id: 'm', contextWindow: 1, maxTokens: 1, input: ['text'], reasoningEfforts: { off: null, high: 'high' } }
+  const { ops, reasoning } = buildFillOps({ providers: { custom: { models: [entry] } } }, [], undefined, { providerReasoning: null })
+  assert.deepEqual(ops, [])
+  assert.deepEqual(reasoning, [{ provider: 'custom', wanted: null, current: null, level: null, blocked: [] }])
+})
+
+test('buildFillOps can set the off default for a non-reasoning provider', () => {
+  const entry = { id: 'm', contextWindow: 1, maxTokens: 1, input: ['text'], reasoningEfforts: false }
+  const { ops, reasoning } = buildFillOps({ providers: { custom: { models: [entry] } } }, [], undefined, { providerReasoning: 'off' })
+  assert.deepEqual(ops, [{ op: 'set', path: ['providers', 'custom', 'reasoning'], value: 'off' }])
+  assert.equal(reasoning[0].level, 'off')
+})
+
+test('listProviderReasoning reports every provider that declares models', () => {
+  const models = parseModelsDev(SAMPLE)
+  const rows = listProviderReasoning({
+    providers: {
+      custom: { displayName: 'Custom', models: [{ id: 'glm-5.2' }] },
+      unsupported: { models: [{ id: 'u', contextWindow: 1, maxTokens: 1, input: ['text'], reasoningEfforts: { low: 'low' } }] },
+      empty: { models: [] },
+    },
+  }, models)
+  assert.deepEqual(rows.map((row) => row.provider), ['custom', 'unsupported'])
+  assert.equal(rows[0].displayName, 'Custom')
+  assert.equal(rows[0].willSet, true)
+  assert.equal(rows[0].wanted, 'high')
+  assert.equal(rows[1].willSet, false)
+  assert.deepEqual(rows[1].blocked, ['u'])
+})
+
 test('parseDefaults sanitizes unknown fields', () => {
   const defaults = parseDefaults({
     contextWindow: 10,
@@ -398,3 +496,138 @@ test('parseDefaults sanitizes unknown fields', () => {
   assert.deepEqual(defaults.thinkingLevels, ['max'])
   assert.equal(defaults.providerReasoning, 'max')
 })
+
+const LEVEL_LESS = {
+  lab: {
+    id: 'lab',
+    name: 'Lab',
+    models: {
+      'switch-only': {
+        id: 'switch-only',
+        name: 'Switch Only',
+        limit: { context: 1000, output: 100 },
+        modalities: { input: ['text'] },
+        reasoning: true,
+        reasoning_options: [{ type: 'toggle' }],
+      },
+      'odd-names': {
+        id: 'odd-names',
+        name: 'Odd Names',
+        limit: { context: 1000, output: 100 },
+        modalities: { input: ['text'] },
+        reasoning: true,
+        reasoning_options: [{ type: 'effort', values: ['none', 'default'] }],
+      },
+      'off-only': {
+        id: 'off-only',
+        name: 'Off Only',
+        limit: { context: 1000, output: 100 },
+        modalities: { input: ['text'] },
+        reasoning: true,
+        reasoning_options: [{ type: 'effort', values: ['off'] }],
+      },
+      'off-and-high': {
+        id: 'off-and-high',
+        name: 'Off And High',
+        limit: { context: 1000, output: 100 },
+        modalities: { input: ['text'] },
+        reasoning: true,
+        reasoning_options: [{ type: 'effort', values: ['off', 'high'] }],
+      },
+    },
+  },
+}
+
+test('thinkingFromEntry reports effort values DSH cannot dispatch as a gap', () => {
+  const parsed = parseModelsDev(LEVEL_LESS)
+  const byId = (id) => parsed.find((item) => item.id === id)
+  for (const id of ['odd-names', 'off-only']) {
+    assert.equal(byId(id).thinkingLevels, null, id)
+    assert.equal(byId(id).thinkingGap, 'unmapped', id)
+  }
+  assert.deepEqual(byId('off-and-high').thinkingLevels, ['off', 'high'])
+  assert.equal(byId('off-and-high').thinkingGap, null)
+})
+
+test('fillModelEntry leaves the field unset for an unmappable level set', () => {
+  const models = parseModelsDev(LEVEL_LESS)
+  for (const id of ['switch-only', 'odd-names', 'off-only']) {
+    const { model, matched } = fillModelEntry({ id }, models, { thinkingLevels: ['off', 'low', 'high'] })
+    assert.equal(matched, true, id)
+    assert.equal(Object.hasOwn(model, 'reasoningEfforts'), false, id)
+  }
+})
+
+test('fillModelEntry maps an off-only default to false, never to an off-only dict', () => {
+  const { model } = fillModelEntry({ id: 'unlisted' }, [], { thinkingLevels: ['off'] })
+  assert.equal(model.reasoningEfforts, false)
+})
+
+test('parseCatalogFile treats an older cache version as stale', () => {
+  const fresh = parseCatalogFile({ version: CATALOG_VERSION, updatedAt: '2026-01-01T00:00:00.000Z', models: [] })
+  assert.equal(fresh.updatedAt, '2026-01-01T00:00:00.000Z')
+  const old = parseCatalogFile({ version: 1, updatedAt: '2026-01-01T00:00:00.000Z', models: [] })
+  assert.equal(old.updatedAt, '')
+  assert.equal(old.version, CATALOG_VERSION)
+  assert.equal(catalogIsStale(old.updatedAt, Date.parse('2026-01-02T00:00:00.000Z')), true)
+})
+
+test('isLegacyFabricatedEfforts matches only the invented four levels', () => {
+  assert.equal(isLegacyFabricatedEfforts({ off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high' }), true)
+  assert.equal(isLegacyFabricatedEfforts({ off: null, low: 'low', medium: 'medium', high: 'high' }), false)
+  assert.equal(isLegacyFabricatedEfforts({ off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'xhigh' }), false)
+  assert.equal(isLegacyFabricatedEfforts(false), false)
+  assert.equal(isLegacyFabricatedEfforts({ off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high', max: 'max' }), false)
+})
+
+test('listLegacyThinkingGuesses reports the 0.2.0 fabrication on level-less hits only', () => {
+  const models = parseModelsDev(LEVEL_LESS)
+  const fabricated = { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high' }
+  const config = {
+    providers: {
+      custom: {
+        displayName: 'Custom',
+        models: [
+          { id: 'switch-only', reasoningEfforts: { ...fabricated } },
+          { id: 'off-and-high', reasoningEfforts: { ...fabricated } },
+          { id: 'switch-only-2', reasoningEfforts: { off: null, high: 'high' } },
+        ],
+      },
+    },
+  }
+  const guesses = listLegacyThinkingGuesses(config, models)
+  assert.deepEqual(guesses.map((item) => item.id), ['switch-only'])
+  assert.equal(guesses[0].provider, 'custom')
+  assert.equal(typeof guesses[0].note, 'string')
+  assert.equal(guesses[0].note.length > 0, true)
+})
+
+test('applyModelPatch honours an explicit thinking mode', () => {
+  const models = parseModelsDev(LEVEL_LESS)
+  const entry = {
+    id: 'switch-only',
+    contextWindow: 1,
+    maxTokens: 1,
+    input: ['text'],
+    reasoningEfforts: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high' },
+  }
+  const kept = applyModelPatch(entry, { thinkingMode: 'unset' }, undefined, models)
+  assert.equal(Object.hasOwn(kept, 'reasoningEfforts'), false)
+  const none = applyModelPatch(entry, { thinkingMode: 'none' }, undefined, models)
+  assert.equal(none.reasoningEfforts, false)
+  const levels = applyModelPatch(entry, { thinkingMode: 'levels', thinkingLevels: ['low', 'high'] }, undefined, models)
+  assert.deepEqual(levels.reasoningEfforts, { off: null, low: 'low', high: 'high' })
+  const emptied = applyModelPatch(entry, { thinkingMode: 'levels', thinkingLevels: [] }, undefined, models)
+  assert.equal(Object.hasOwn(emptied, 'reasoningEfforts'), false)
+  const offOnly = applyModelPatch(entry, { thinkingMode: 'levels', thinkingLevels: ['off'] }, undefined, models)
+  assert.equal(Object.hasOwn(offOnly, 'reasoningEfforts'), false)
+})
+
+test('applyModelPatch does not invent levels for a level-less catalog hit', () => {
+  const models = parseModelsDev(LEVEL_LESS)
+  const patched = applyModelPatch({ id: 'switch-only' }, {}, { thinkingLevels: ['off', 'low', 'high'] }, models)
+  assert.equal(Object.hasOwn(patched, 'reasoningEfforts'), false)
+  const unmatched = applyModelPatch({ id: 'not-in-catalog' }, {}, { thinkingLevels: ['off', 'low', 'high'] }, models)
+  assert.deepEqual(unmatched.reasoningEfforts, { off: null, low: 'low', high: 'high' })
+})
+
