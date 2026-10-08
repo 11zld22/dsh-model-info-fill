@@ -83,6 +83,23 @@ test('lookup matches exact, prefix, and catalog tail', () => {
   assert.equal(lookupCatalogModel(models, 'GLM-5.2')?.id, 'glm-5.2')
 })
 
+test('lookup never matches on a variant suffix alone', () => {
+  const models = parseModelsDev({
+    ...SAMPLE,
+    free: {
+      id: 'free',
+      name: 'Free rows',
+      models: {
+        'gemma-4-31b-it:free': { id: 'gemma-4-31b-it:free', name: 'Gemma', limit: { context: 1000, output: 100 }, modalities: { input: ['text'] } },
+      },
+    },
+    },
+  )
+  assert.equal(lookupCatalogModel(models, 'inclusionai/ling-3.1-flash:free'), undefined)
+  assert.equal(lookupCatalogModel(models, 'other/thing:free'), undefined)
+  assert.equal(lookupCatalogModel(models, 'gemma-4-31b-it:free')?.id, 'gemma-4-31b-it:free')
+})
+
 test('reasoningEffortsFromLevels maps DSH wire values', () => {
   assert.equal(reasoningEffortsFromLevels([]), false)
   assert.deepEqual(reasoningEffortsFromLevels(['off', 'low', 'high', 'max']), {
