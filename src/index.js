@@ -8,6 +8,7 @@ import {
   buildModelSaveOps,
   catalogIsStale,
   emptyCatalogFile,
+  listThinkingGaps,
   listUnmatched,
   parseCatalogFile,
   parseDefaults,
@@ -94,6 +95,7 @@ export function apply(ctx) {
     autoFill: store.file.autoFill !== false,
     defaults: store.file.defaults,
     unmatched: listUnmatched(currentConfig(), store.file.models),
+    thinkingGaps: listThinkingGaps(currentConfig(), store.file.models),
     filling: store.filling,
     refreshing: store.refreshing,
   })

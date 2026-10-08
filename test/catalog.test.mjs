@@ -8,6 +8,7 @@ import {
   catalogIsStale,
   fillModelEntry,
   formatCatalogStamp,
+  listThinkingGaps,
   listUnmatched,
   lookupCatalogModel,
   parseCatalogFile,
@@ -142,16 +143,184 @@ test('fillModelEntry sets reasoningEfforts false when catalog has no thinking', 
   assert.deepEqual(model.input, ['text', 'image'])
 })
 
-test('fillModelEntry uses default thinking levels when catalog only flags reasoning', () => {
+test('fillModelEntry leaves reasoning unset when catalog only flags reasoning', () => {
   const models = parseModelsDev(SAMPLE)
-  const { model } = fillModelEntry({ id: 'deepseek-chat' }, models)
+  const chat = models.find((item) => item.id === 'deepseek-chat')
+  assert.equal(chat.thinkingLevels, null)
+  assert.equal(chat.thinkingGap, 'unspecified')
+  const { model, changed, matched } = fillModelEntry({ id: 'deepseek-chat' }, models, {
+    thinkingLevels: ['off', 'max'],
+  })
+  assert.equal(matched, true)
+  assert.equal(changed, true)
+  assert.equal(model.contextWindow, 65536)
+  assert.equal(model.maxTokens, 8192)
+  assert.equal(Object.hasOwn(model, 'reasoningEfforts'), false)
+})
+
+test('fillModelEntry does not rewrite a boolean-only model that already has efforts', () => {
+  const models = parseModelsDev(SAMPLE)
+  const existing = { off: null, high: 'high' }
+  const { model, changed } = fillModelEntry({
+    id: 'deepseek-chat',
+    name: 'DeepSeek Chat',
+    contextWindow: 65536,
+    maxTokens: 8192,
+    input: ['text'],
+    reasoningEfforts: existing,
+  }, models)
+  assert.equal(changed, false)
+  assert.deepEqual(model.reasoningEfforts, existing)
+})
+
+test('fillModelEntry drops an empty reasoningEfforts object on a level-less catalog hit', () => {
+  const models = parseModelsDev(SAMPLE)
+  const { model, changed } = fillModelEntry({
+    id: 'deepseek-chat',
+    contextWindow: 65536,
+    maxTokens: 8192,
+    input: ['text'],
+    name: 'DeepSeek Chat',
+    reasoningEfforts: {},
+  }, models)
+  assert.equal(changed, true)
+  assert.equal(Object.hasOwn(model, 'reasoningEfforts'), false)
+})
+
+const SHAPES = {
+  lab: {
+    id: 'lab',
+    name: 'Lab',
+    models: {
+      'toggle-only': {
+        id: 'toggle-only',
+        name: 'Toggle Only',
+        limit: { context: 1000, output: 100 },
+        modalities: { input: ['text'] },
+        reasoning: true,
+        reasoning_options: [{ type: 'toggle' }],
+      },
+      'budget-only': {
+        id: 'budget-only',
+        name: 'Budget Only',
+        limit: { context: 2000, output: 200 },
+        modalities: { input: ['text'] },
+        reasoning: true,
+        reasoning_options: [{ type: 'budget_tokens', min: 1024, max: 32000 }],
+      },
+      'toggle-and-budget': {
+        id: 'toggle-and-budget',
+        name: 'Toggle And Budget',
+        limit: { context: 3000, output: 300 },
+        modalities: { input: ['text', 'image'] },
+        reasoning: true,
+        reasoning_options: [
+          { type: 'toggle' },
+          { type: 'budget_tokens' },
+        ],
+      },
+      'effort-and-toggle': {
+        id: 'effort-and-toggle',
+        name: 'Effort And Toggle',
+        limit: { context: 4000, output: 400 },
+        modalities: { input: ['text'] },
+        reasoning: true,
+        reasoning_options: [
+          { type: 'toggle' },
+          { type: 'effort', values: ['high', 'max'] },
+        ],
+      },
+    },
+  },
+}
+
+test('parseModelsDev does not invent levels for toggle, budget, or boolean reasoning', () => {
+  const models = parseModelsDev({ ...SAMPLE, ...SHAPES })
+  const byId = (id) => models.find((item) => item.id === id)
+  assert.equal(byId('deepseek-chat').thinkingLevels, null)
+  assert.equal(byId('deepseek-chat').thinkingGap, 'unspecified')
+  assert.equal(byId('toggle-only').thinkingLevels, null)
+  assert.equal(byId('toggle-only').thinkingGap, 'toggle')
+  assert.equal(byId('budget-only').thinkingLevels, null)
+  assert.equal(byId('budget-only').thinkingGap, 'budget')
+  assert.equal(byId('toggle-and-budget').thinkingLevels, null)
+  assert.equal(byId('toggle-and-budget').thinkingGap, 'toggle-budget')
+  assert.deepEqual(byId('effort-and-toggle').thinkingLevels, ['high', 'max'])
+  assert.equal(byId('effort-and-toggle').thinkingGap, null)
+  assert.deepEqual(byId('glm-5.2').thinkingLevels, ['off', 'low', 'high', 'max'])
+  assert.deepEqual(byId('gpt-4o').thinkingLevels, [])
+  assert.equal(byId('gpt-4o').thinkingGap, null)
+})
+
+test('fillModelEntry leaves toggle and budget models without named efforts', () => {
+  const models = parseModelsDev(SHAPES)
+  for (const id of ['toggle-only', 'budget-only', 'toggle-and-budget']) {
+    const { model, matched } = fillModelEntry({ id }, models, {
+      thinkingLevels: ['minimal', 'low', 'medium', 'high'],
+    })
+    assert.equal(matched, true, id)
+    assert.equal(Object.hasOwn(model, 'reasoningEfforts'), false, id)
+  }
+  const { model } = fillModelEntry({ id: 'effort-and-toggle' }, models)
   assert.deepEqual(model.reasoningEfforts, {
     off: null,
-    minimal: 'minimal',
-    low: 'low',
-    medium: 'medium',
     high: 'high',
+    max: 'max',
   })
+})
+
+test('listThinkingGaps reports level-less catalog hits and skips declared efforts', () => {
+  const models = parseModelsDev({ ...SAMPLE, ...SHAPES })
+  const gaps = listThinkingGaps({
+    providers: {
+      custom: {
+        displayName: 'Custom',
+        reasoning: 'high',
+        models: [
+          { id: 'deepseek-chat' },
+          { id: 'toggle-only' },
+          { id: 'budget-only', reasoningEfforts: { off: null, high: 'high' } },
+          { id: 'toggle-and-budget' },
+          { id: 'glm-5.2' },
+          { id: 'mystery' },
+        ],
+      },
+    },
+  }, models)
+  assert.deepEqual(gaps.map((item) => item.id), ['deepseek-chat', 'toggle-only', 'toggle-and-budget'])
+  assert.equal(gaps[0].thinkingGap, 'unspecified')
+  assert.match(gaps[0].note, /没有写出档位/)
+  assert.equal(gaps[1].thinkingGap, 'toggle')
+  assert.match(gaps[1].note, /思考开关/)
+  assert.equal(gaps[2].thinkingGap, 'toggle-budget')
+  assert.equal(gaps[0].providerReasoning, 'high')
+})
+
+test('buildFillOps fills capacities for a level-less model without inventing efforts', () => {
+  const models = parseModelsDev(SAMPLE)
+  const filled = buildFillOps({
+    providers: { custom: { models: [{ id: 'deepseek-chat' }] } },
+  }, models)
+  assert.equal(filled.ops.length, 1)
+  assert.equal(filled.ops[0].value[0].contextWindow, 65536)
+  assert.equal(filled.ops[0].value[0].maxTokens, 8192)
+  assert.equal(Object.hasOwn(filled.ops[0].value[0], 'reasoningEfforts'), false)
+
+  const quiet = buildFillOps({
+    providers: {
+      custom: {
+        models: [{
+          id: 'deepseek-chat',
+          name: 'DeepSeek Chat',
+          contextWindow: 65536,
+          maxTokens: 8192,
+          input: ['text'],
+        }],
+      },
+    },
+  }, models)
+  assert.deepEqual(quiet.ops, [])
+  assert.deepEqual(quiet.filledProviders, [])
 })
 
 test('buildFillOps only emits changed provider model lists', () => {
