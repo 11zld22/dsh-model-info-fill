@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-info-fill",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "模型信息补全：按模型名自动补全上下文、输出上限、思考档位和图片能力",
   "homepage": "https://github.com/11zld22/dsh-model-info-fill#readme",
   "bugs": {
