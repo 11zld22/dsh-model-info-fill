@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { apply } from '../src/index.js'
 
-function harness(legacy, missing = false) {
+function harness(legacy, missing = false, options = {}) {
   const routes = new Map()
   const events = new Map()
   const timers = []
@@ -32,15 +32,20 @@ function harness(legacy, missing = false) {
     settings,
     get(name) { return name === 'webServer' ? webServer : undefined },
     on(name, handler) { events.set(name, handler) },
-    effect(fn, label) { if (label?.startsWith('models-dev-catalog: /')) fn() },
+    effect(fn, label) {
+      if (label?.startsWith('models-dev-catalog: /')) fn()
+      if (options.cache && label === 'models-dev-catalog: cache') fn()
+    },
     timeout(fn) { timers.push(fn) },
   })
 
-  async function request(path, body = {}) {
+  async function request(path, body = {}, method = 'POST') {
     const req = {
-      method: 'POST',
+      method,
       socket: { remoteAddress: '127.0.0.1' },
-      async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)) },
+      async *[Symbol.asyncIterator]() {
+        if (method !== 'GET') yield Buffer.from(JSON.stringify(body))
+      },
     }
     const response = { status: 0, body: null }
     const res = {
@@ -73,6 +78,56 @@ for (const legacy of [true, false]) {
     assert.equal(app.timers.length, 1)
   })
 }
+
+test('confirming the fabricated levels dismisses the row without rewriting settings', async () => {
+  const { mkdir, writeFile, rm } = await import('node:fs/promises')
+  const home = 'C:/Users/miku/AppData/Local/Temp/dsh-model-info-fill-confirm'
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  await rm(home, { recursive: true, force: true })
+  await mkdir(home, { recursive: true })
+  await writeFile(`${home}/models-dev.json`, `${JSON.stringify({
+    version: 2,
+    updatedAt: new Date().toISOString(),
+    autoFill: false,
+    models: [{
+      id: 'switch-only',
+      name: 'Switch',
+      provider: 'Example',
+      thinkingLevels: null,
+      thinkingGap: 'unspecified',
+    }],
+  })}\n`)
+  try {
+    const app = harness(false, false, { cache: true })
+    app.config.providers.custom.models[0] = {
+      id: 'switch-only',
+      reasoningEfforts: { off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high' },
+    }
+    let before = null
+    for (let i = 0; i < 20; i += 1) {
+      before = await app.request('status', {}, 'GET')
+      if (before.body.legacyThinking.length === 1) break
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    assert.equal(before.body.legacyThinking.length, 1)
+    const saved = await app.request('model', {
+      provider: 'custom',
+      id: 'switch-only',
+      thinkingMode: 'levels',
+      thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high'],
+      confirmLegacy: true,
+    })
+    assert.equal(saved.status, 200)
+    assert.equal(app.writes.length, 0)
+    assert.deepEqual(saved.body.legacyThinking, [])
+    const again = await app.request('status', {}, 'GET')
+    assert.deepEqual(again.body.legacyThinking, [])
+  } finally {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  }
+})
 
 test('0.1.7 refuses to fill when the model settings entry is unavailable', async () => {
   const app = harness(false, true)

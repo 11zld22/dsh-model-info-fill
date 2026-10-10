@@ -9,8 +9,10 @@ import {
   catalogIsStale,
   CATALOG_VERSION,
   emptyCatalogFile,
+  isLegacyLevelSelection,
   listLegacyThinkingGuesses,
   listProviderReasoning,
+  rememberLegacyConfirmation,
   listThinkingGaps,
   listUnmatched,
   parseCatalogFile,
@@ -99,7 +101,7 @@ export function apply(ctx) {
     defaults: store.file.defaults,
     unmatched: listUnmatched(currentConfig(), store.file.models),
     thinkingGaps: listThinkingGaps(currentConfig(), store.file.models),
-    legacyThinking: listLegacyThinkingGuesses(currentConfig(), store.file.models),
+    legacyThinking: listLegacyThinkingGuesses(currentConfig(), store.file.models, store.file.confirmedLegacy),
     reasoning: listProviderReasoning(currentConfig(), store.file.models, store.file.defaults),
     filling: store.filling,
     refreshing: store.refreshing,
@@ -139,6 +141,7 @@ export function apply(ctx) {
         updatedAt: new Date().toISOString(),
         autoFill: store.file.autoFill !== false,
         defaults: parseDefaults(store.file.defaults),
+        confirmedLegacy: store.file.confirmedLegacy ?? [],
         models: parseModelsDev(data),
       }
       await persist()
@@ -268,6 +271,17 @@ export function apply(ctx) {
           return
         }
         const body = await readJsonBody(req)
+        const keepingLegacy = body.confirmLegacy === true
+          && body.thinkingMode === 'levels'
+          && isLegacyLevelSelection(body.thinkingLevels)
+        if (keepingLegacy) {
+          // 四档原样留下：配置本来就是这样，再写一次不会让它离开待确认。
+          // 只记下确认。跳过 settings 写入，避免保存失败时确认也一起丢掉。
+          store.file.confirmedLegacy = rememberLegacyConfirmation(store.file.confirmedLegacy, body.provider, body.id)
+          await persist()
+          send(res, 200, status())
+          return
+        }
         const ops = buildModelSaveOps(readConfig(), body, store.file.defaults, store.file.models)
         await ctx.settings.mutate(LLM_PI_AI_NS, ops, llmRevision())
         send(res, 200, status())

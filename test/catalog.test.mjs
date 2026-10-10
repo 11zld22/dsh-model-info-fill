@@ -11,6 +11,7 @@ import {
   fillModelEntry,
   formatCatalogStamp,
   isLegacyFabricatedEfforts,
+  isLegacyLevelSelection,
   listLegacyThinkingGuesses,
   listProviderReasoning,
   listThinkingGaps,
@@ -617,6 +618,20 @@ test('listLegacyThinkingGuesses reports the 0.2.0 fabrication on level-less hits
   assert.equal(guesses[0].provider, 'custom')
   assert.equal(typeof guesses[0].note, 'string')
   assert.equal(guesses[0].note.length > 0, true)
+  const accepted = listLegacyThinkingGuesses(config, models, ['custom\nswitch-only'])
+  assert.deepEqual(accepted, [])
+})
+
+test('isLegacyLevelSelection matches the invented four levels', () => {
+  assert.equal(isLegacyLevelSelection(['off', 'minimal', 'low', 'medium', 'high']), true)
+  assert.equal(isLegacyLevelSelection(['low', 'high']), false)
+})
+
+test('parseCatalogFile keeps confirmed legacy rows', () => {
+  const file = parseCatalogFile({
+    confirmedLegacy: [{ provider: 'custom', id: 'switch-only' }, { provider: 'custom', id: 'switch-only' }],
+  })
+  assert.deepEqual(file.confirmedLegacy, ['custom\nswitch-only'])
 })
 
 test('applyModelPatch honours an explicit thinking mode', () => {
