@@ -50,6 +50,7 @@ export function emptyCatalogFile() {
     autoFill: true,
     defaults: emptyDefaults(),
     models: [],
+    confirmedLegacy: [],
   }
 }
 
@@ -419,7 +420,42 @@ export const LEGACY_FABRICATED_EFFORTS = Object.freeze({
   high: 'high',
 })
 
-export const LEGACY_GUESS_NOTE = '这四档看起来是旧版本按「会思考」代填的（百科没有写明档位）。确认供应商文档后处理：勾上真正支持的档位保存，或选「保持未声明」清掉。'
+export const LEGACY_GUESS_NOTE = '这四档是旧版本按「会思考」代填的，百科没有写明档位。档位没错就点「确认保留」，这条会从待确认里消失。不该有这些档位就点「清掉档位」。要改成别的档位，勾好后点「确认档位」。'
+
+export function legacyConfirmKey(provider, id) {
+  return `${String(provider ?? '').trim()}\n${String(id ?? '').trim()}`
+}
+
+export function parseConfirmedLegacy(raw) {
+  if (!Array.isArray(raw)) return []
+  const keys = []
+  for (const item of raw) {
+    if (typeof item === 'string') {
+      const splitAt = item.indexOf('\n')
+      if (splitAt <= 0 || splitAt === item.length - 1) continue
+      keys.push(legacyConfirmKey(item.slice(0, splitAt), item.slice(splitAt + 1)))
+      continue
+    }
+    const record = asRecord(item)
+    if (!record) continue
+    const provider = typeof record.provider === 'string' ? record.provider.trim() : ''
+    const id = typeof record.id === 'string' ? record.id.trim() : ''
+    if (provider && id) keys.push(legacyConfirmKey(provider, id))
+  }
+  return [...new Set(keys)]
+}
+
+export function rememberLegacyConfirmation(confirmed, provider, id) {
+  const keys = parseConfirmedLegacy(confirmed)
+  const key = legacyConfirmKey(provider, id)
+  if (key === '\n' || key.startsWith('\n') || key.endsWith('\n')) return keys
+  if (!keys.includes(key)) keys.push(key)
+  return keys
+}
+
+export function isLegacyLevelSelection(levels) {
+  return isLegacyFabricatedEfforts(reasoningEffortsFromLevels(levels))
+}
 
 export function isLegacyFabricatedEfforts(value) {
   const record = asRecord(value)
@@ -429,12 +465,14 @@ export function isLegacyFabricatedEfforts(value) {
   return expected.every(([level, wire]) => record[level] === wire)
 }
 
-export function listLegacyThinkingGuesses(config, models) {
+export function listLegacyThinkingGuesses(config, models, confirmed = []) {
+  const accepted = new Set(parseConfirmedLegacy(confirmed))
   const guesses = []
   for (const item of configuredModels(config)) {
     const hit = lookupCatalogModel(models, item.id)
     if (!hit || hit.thinkingLevels !== null) continue
     if (!isLegacyFabricatedEfforts(item.entry.reasoningEfforts)) continue
+    if (accepted.has(legacyConfirmKey(item.provider, item.id))) continue
     guesses.push({ ...modelReport(item), note: LEGACY_GUESS_NOTE })
   }
   return guesses
@@ -588,6 +626,7 @@ export function parseCatalogFile(raw) {
     autoFill: record.autoFill !== false,
     defaults: parseDefaults(record.defaults),
     models,
+    confirmedLegacy: parseConfirmedLegacy(record.confirmedLegacy),
   }
 }
 

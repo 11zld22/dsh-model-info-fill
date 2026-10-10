@@ -17,15 +17,22 @@ window.__ModuleLoader__.load({
 .mdc-wrap { display: flex; flex-direction: column; gap: 8px; width: 100%; }
 .mdc-row {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
   width: 100%;
-  padding: 10px 12px;
+  padding: 12px;
   border: .5px solid var(--dsw-alias-border-l4, rgba(127,127,127,.2));
   border-radius: 16px;
   background: transparent;
   color: var(--dsw-alias-label-primary, inherit);
   box-sizing: border-box;
+}
+.mdc-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 200px;
 }
 .mdc-icon {
   flex: none;
@@ -39,19 +46,73 @@ window.__ModuleLoader__.load({
   font-weight: 500;
   line-height: 22px;
 }
+.mdc-meta {
+  margin-top: 2px;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-secondary, #666);
+}
 .mdc-desc {
   margin-top: 2px;
   font-size: 12px;
   line-height: 18px;
   color: var(--dsw-alias-label-tertiary, #888);
 }
+.mdc-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.mdc-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.mdc-chip {
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0 10px;
+  border: .5px solid var(--dsw-alias-border-l3, rgba(127,127,127,.3));
+  border-radius: 14px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary, inherit);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+.mdc-chip:hover {
+  background: var(--dsw-alias-interactive-bg-hover-solid, rgba(127,127,127,.12));
+}
+.mdc-chip:focus-visible {
+  box-shadow: 0 0 0 2px var(--dsw-alias-border-l3, rgba(127,127,127,.35));
+  outline: none;
+}
+.mdc-chip-warn {
+  color: var(--dsw-alias-state-warning-primary, #9a3412);
+  border-color: color-mix(in srgb, var(--dsw-alias-state-warning-primary, #9a3412) 45%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-state-warning-primary, #c2410c) 10%, transparent);
+}
+.mdc-chip-on {
+  background: var(--dsw-alias-interactive-bg-hover-solid, rgba(127,127,127,.16));
+  border-color: var(--dsw-alias-label-secondary, #666);
+}
+.mdc-chip-warn.mdc-chip-on {
+  background: color-mix(in srgb, var(--dsw-alias-state-warning-primary, #c2410c) 18%, transparent);
+  border-color: var(--dsw-alias-state-warning-primary, #9a3412);
+}
 .mdc-actions {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex: none;
   flex-wrap: wrap;
   justify-content: flex-end;
+  margin-left: auto;
+  max-width: 100%;
 }
 .mdc-btn {
   box-sizing: border-box;
@@ -348,6 +409,26 @@ window.__ModuleLoader__.load({
         setError('')
         onSave({ ...draft, thinkingMode: mode })
       }
+      const keepingLegacy = kind === 'legacy' && mode === 'levels' && isLegacyLevelSet(levels)
+      const confirmLabel = mode === 'none'
+        ? '确认不会思考'
+        : mode === 'unset'
+          ? '确认清掉'
+          : keepingLegacy
+            ? '确认保留'
+            : '确认档位'
+      const confirm = () => {
+        if (mode === 'levels' && thinking.length === 0) {
+          setError('「指定档位」至少要勾一个 off 以外的档位；只声明不会思考请选「不会思考」。')
+          return
+        }
+        setError('')
+        onSave({ ...draft, thinkingMode: mode, confirmLegacy: keepingLegacy })
+      }
+      const clearLegacy = () => {
+        setError('')
+        onSave({ ...draft, thinkingMode: 'unset' })
+      }
       return h('div', { className: 'mdc-item' },
         h('div', { className: 'mdc-item-head' },
           h('div', { className: 'mdc-item-id' }, draft.id),
@@ -409,14 +490,40 @@ window.__ModuleLoader__.load({
         ),
         error ? h('div', { className: 'mdc-desc mdc-error' }, error) : null,
         h('div', { className: 'mdc-actions' },
-          h('button', {
+          kind === 'legacy' && mode !== 'unset' ? h('button', {
             className: 'mdc-btn mdc-btn-inline',
             type: 'button',
             disabled: busy,
-            onClick: save,
-          }, busy ? '保存中…' : '保存'),
+            onClick: clearLegacy,
+          }, busy ? '处理中…' : '清掉档位') : null,
+          h('button', {
+            className: kind === 'legacy' ? 'mdc-btn mdc-btn-inline mdc-btn-primary' : 'mdc-btn mdc-btn-inline',
+            type: 'button',
+            disabled: busy,
+            onClick: kind === 'legacy' ? confirm : save,
+          }, busy ? '处理中…' : kind === 'legacy' ? confirmLabel : '保存'),
         ),
       )
+    }
+
+    const LEGACY_LEVELS = ['off', 'minimal', 'low', 'medium', 'high']
+
+    function isLegacyLevelSet(levels) {
+      const selected = Array.isArray(levels) ? levels : []
+      return LEGACY_LEVELS.every((level) => selected.includes(level))
+        && selected.every((level) => LEGACY_LEVELS.includes(level))
+    }
+
+    function StatusChip({ label, tone, active, onClick }) {
+      const classes = ['mdc-chip']
+      if (tone) classes.push(`mdc-chip-${tone}`)
+      if (active) classes.push('mdc-chip-on')
+      return h('button', {
+        className: classes.join(' '),
+        type: 'button',
+        'aria-pressed': active ? 'true' : 'false',
+        onClick,
+      }, label)
     }
 
     function Footer() {
@@ -430,7 +537,7 @@ window.__ModuleLoader__.load({
         reasoning: [],
         defaults: null,
       })
-      const [open, setOpen] = useState(false)
+      const [panel, setPanel] = useState(null)
       const [busy, setBusy] = useState('')
       const [error, setError] = useState('')
       const [hint, setHint] = useState('')
@@ -438,12 +545,11 @@ window.__ModuleLoader__.load({
       const thinkingGaps = Array.isArray(state.thinkingGaps) ? state.thinkingGaps : []
       const legacyThinking = Array.isArray(state.legacyThinking) ? state.legacyThinking : []
       const reasoning = Array.isArray(state.reasoning) ? state.reasoning : []
-      const counts = [
-        unmatched.length ? `未匹配 ${unmatched.length}` : '',
-        thinkingGaps.length ? `档位 ${thinkingGaps.length}` : '',
-        legacyThinking.length ? `待确认 ${legacyThinking.length}` : '',
-      ].filter(Boolean)
-      const detailLabel = counts.length > 0 ? counts.join(' · ') : '未匹配'
+      const togglePanel = (next) => setPanel((current) => current === next ? null : next)
+      const showDetail = panel === 'detail'
+      const showGaps = (showDetail || panel === 'gap') && thinkingGaps.length > 0
+      const showLegacy = (showDetail || panel === 'legacy') && legacyThinking.length > 0
+      const showUnmatched = showDetail || panel === 'unmatched'
 
       const load = useCallback(async () => {
         const next = await api('/status')
@@ -474,67 +580,84 @@ window.__ModuleLoader__.load({
 
       return h('div', { className: 'mdc-wrap' },
         h('div', { className: 'mdc-row' },
-          h(RefreshIcon),
-          h('div', { className: 'mdc-body' },
-            h('div', { className: 'mdc-title' }, '模型信息补全'),
-            h('div', { className: 'mdc-desc' },
-              '按模型名补全上下文、输出上限、思考档位和图片能力。',
-              formatStamp(state.updatedAt, state.modelCount),
-              unmatched.length ? ` · 未匹配 ${unmatched.length}` : '',
-              thinkingGaps.length ? ` · 档位未写明 ${thinkingGaps.length}` : '',
-              legacyThinking.length ? ` · 待确认 ${legacyThinking.length}` : '',
+          h('div', { className: 'mdc-head' },
+            h(RefreshIcon),
+            h('div', { className: 'mdc-body' },
+              h('div', { className: 'mdc-title' }, '模型信息补全'),
+              h('div', { className: 'mdc-meta' }, formatStamp(state.updatedAt, state.modelCount)),
             ),
-            error ? h('div', { className: 'mdc-desc mdc-error' }, error) : null,
-            hint ? h('div', { className: 'mdc-desc mdc-ok' }, hint) : null,
           ),
-          h('div', { className: 'mdc-actions' },
-            h('label', { className: 'mdc-toggle' },
-              h('input', {
-                type: 'checkbox',
-                checked: state.autoFill !== false,
-                disabled: Boolean(busy),
-                onChange: (event) => run('prefs', () => post('/prefs', { autoFill: event.target.checked })),
-              }),
-              '自动补全',
+          error ? h('div', { className: 'mdc-desc mdc-error' }, error) : null,
+          hint ? h('div', { className: 'mdc-desc mdc-ok' }, hint) : null,
+          h('div', { className: 'mdc-toolbar' },
+            h('div', { className: 'mdc-chips' },
+              unmatched.length ? h(StatusChip, {
+                label: `未匹配 ${unmatched.length}`,
+                active: panel === 'unmatched',
+                onClick: () => togglePanel('unmatched'),
+              }) : null,
+              thinkingGaps.length ? h(StatusChip, {
+                label: `档位未写明 ${thinkingGaps.length}`,
+                active: panel === 'gap',
+                onClick: () => togglePanel('gap'),
+              }) : null,
+              legacyThinking.length ? h(StatusChip, {
+                label: `待确认 ${legacyThinking.length}`,
+                tone: 'warn',
+                active: panel === 'legacy',
+                onClick: () => togglePanel('legacy'),
+              }) : null,
             ),
-            h('button', {
-              className: 'mdc-btn',
-              type: 'button',
-              onClick: () => setOpen((value) => !value),
-            }, open ? '收起' : detailLabel),
-            h('button', {
-              className: 'mdc-btn',
-              type: 'button',
-              disabled: Boolean(busy),
-              onClick: () => run('fill', () => post('/fill', {}), fillHint),
-            }, busy === 'fill' ? '补全中…' : '补全全部缺失'),
-            h('button', {
-              className: 'mdc-btn mdc-btn-primary',
-              type: 'button',
-              disabled: Boolean(busy),
-              onClick: () => run('refresh', () => post('/refresh'), '百科已更新'),
-            }, busy === 'refresh' ? '更新中…' : '更新'),
+            h('div', { className: 'mdc-actions' },
+              h('label', { className: 'mdc-toggle' },
+                h('input', {
+                  type: 'checkbox',
+                  checked: state.autoFill !== false,
+                  disabled: Boolean(busy),
+                  onChange: (event) => run('prefs', () => post('/prefs', { autoFill: event.target.checked })),
+                }),
+                '自动补全',
+              ),
+              h('button', {
+                className: 'mdc-btn',
+                type: 'button',
+                onClick: () => togglePanel('detail'),
+              }, showDetail ? '收起' : '详情'),
+              h('button', {
+                className: 'mdc-btn',
+                type: 'button',
+                disabled: Boolean(busy),
+                onClick: () => run('fill', () => post('/fill', {}), fillHint),
+              }, busy === 'fill' ? '补全中…' : '补全全部缺失'),
+              h('button', {
+                className: 'mdc-btn mdc-btn-primary',
+                type: 'button',
+                disabled: Boolean(busy),
+                onClick: () => run('refresh', () => post('/refresh'), '百科已更新'),
+              }, busy === 'refresh' ? '更新中…' : '更新'),
+            ),
           ),
         ),
-        open ? h('div', { className: 'mdc-panel' },
-          h(DefaultsForm, {
+        panel ? h('div', { className: 'mdc-panel' },
+          showDetail ? h('div', { className: 'mdc-desc' }, '按模型名补全上下文、输出上限、思考档位和图片能力。') : null,
+          showDetail ? h(DefaultsForm, {
             defaults: state.defaults,
             busy: busy === 'defaults',
             onSave: (defaults) => run('defaults', () => post('/prefs', { defaults }), '默认值已保存'),
-          }),
-          h('div', { className: 'mdc-item' },
+          }) : null,
+          showDetail ? h('div', { className: 'mdc-item' },
             h('div', { className: 'mdc-block-title' }, '供应商默认档位'),
             reasoning.length === 0
               ? h('div', { className: 'mdc-desc' }, '还没有自定义供应商。')
               : reasoning.map((row) => h('div', { key: row.provider, className: 'mdc-desc' },
                 `${row.displayName}：${reasoningRowText(row)}`,
               )),
-          ),
-          thinkingGaps.length ? h('div', { className: 'mdc-block-title' }, '档位未写明') : null,
-          thinkingGaps.length ? h('div', { className: 'mdc-desc' },
+          ) : null,
+          showGaps ? h('div', { className: 'mdc-block-title' }, '档位未写明') : null,
+          showGaps ? h('div', { className: 'mdc-desc' },
             '百科标明这些模型会思考，但没有写出 DSH 能用的离散档位（只有开关、token 预算、只写了会思考，或档位名 DSH 不认）。插件不会代填 minimal / low / medium / high，保持「保持未声明」保存就不会替它们声明任何档位。',
           ) : null,
-          thinkingGaps.map((item) => h(UnmatchedRow, {
+          showGaps ? thinkingGaps.map((item) => h(UnmatchedRow, {
             key: `gap:${item.provider}/${item.id}`,
             item,
             kind: 'gap',
@@ -545,12 +668,12 @@ window.__ModuleLoader__.load({
               () => post('/model', draft),
               `已保存 ${draft.id}`,
             ),
-          })),
-          legacyThinking.length ? h('div', { className: 'mdc-block-title' }, '疑似旧版本代填，请确认') : null,
-          legacyThinking.length ? h('div', { className: 'mdc-desc' },
-            '这些模型的配置里正好是旧版本替「会思考」代填的四档（minimal / low / medium / high），而百科并没有写明档位。插件不会自动改写已经写过的配置，也不会用猜测覆盖它 —— 按供应商文档处理：确认支持的档位就选「指定档位」，不确定或确认不应有这些档位就选「保持未声明」清掉。',
+          })) : null,
+          showLegacy ? h('div', { className: 'mdc-block-title' }, '疑似旧版本代填，请确认') : null,
+          showLegacy ? h('div', { className: 'mdc-desc' },
+            '这些模型的配置里正好是旧版本替「会思考」代填的四档（minimal / low / medium / high），而百科并没有写明档位。点「确认保留」表示这四档可以留下，这条会离开待确认；点「清掉档位」则不再声明思考档。改成别的档位后点「确认档位」。',
           ) : null,
-          legacyThinking.map((item) => h(UnmatchedRow, {
+          showLegacy ? legacyThinking.map((item) => h(UnmatchedRow, {
             key: `legacy:${item.provider}/${item.id}`,
             item,
             kind: 'legacy',
@@ -559,26 +682,36 @@ window.__ModuleLoader__.load({
             onSave: (draft) => run(
               `model:${draft.provider}/${draft.id}`,
               () => post('/model', draft),
-              `已保存 ${draft.id}`,
+              (result) => {
+                const still = Array.isArray(result?.legacyThinking)
+                  && result.legacyThinking.some((row) => row.provider === draft.provider && row.id === draft.id)
+                if (draft.confirmLegacy && still) {
+                  throw new Error(`确认没有写上，${draft.id} 还在待确认里。重启 DSH 后再试一次。`)
+                }
+                if (draft.confirmLegacy) return `已确认保留 ${draft.id}`
+                if (draft.thinkingMode === 'unset') return `已清掉 ${draft.id} 的档位`
+                return `已保存 ${draft.id}`
+              },
             ),
-          })),
-          unmatched.length || thinkingGaps.length || legacyThinking.length
+          })) : null,
+          showUnmatched && (unmatched.length > 0 || thinkingGaps.length > 0 || legacyThinking.length > 0 || panel === 'unmatched')
             ? h('div', { className: 'mdc-block-title' }, '未匹配百科')
             : null,
-          unmatched.length === 0
+          showUnmatched && unmatched.length === 0
             ? h('div', { className: 'mdc-desc' }, '当前没有未匹配的模型。')
-            : unmatched.map((item) => h(UnmatchedRow, {
-              key: `${item.provider}/${item.id}`,
-              item,
-              kind: 'unmatched',
-              fallbackLevels: state.defaults?.thinkingLevels,
-              busy: busy === `model:${item.provider}/${item.id}`,
-              onSave: (draft) => run(
-                `model:${draft.provider}/${draft.id}`,
-                () => post('/model', draft),
-                `已保存 ${draft.id}`,
-              ),
-            })),
+            : null,
+          showUnmatched ? unmatched.map((item) => h(UnmatchedRow, {
+            key: `${item.provider}/${item.id}`,
+            item,
+            kind: 'unmatched',
+            fallbackLevels: state.defaults?.thinkingLevels,
+            busy: busy === `model:${item.provider}/${item.id}`,
+            onSave: (draft) => run(
+              `model:${draft.provider}/${draft.id}`,
+              () => post('/model', draft),
+              `已保存 ${draft.id}`,
+            ),
+          })) : null,
         ) : null,
       )
     }
