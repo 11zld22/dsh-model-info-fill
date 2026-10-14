@@ -309,12 +309,37 @@ window.__ModuleLoader__.load({
       )
     }
 
+    function readNumber(raw) {
+      if (typeof raw !== 'string' || raw.trim() === '') return null
+      const value = Number(raw)
+      return Number.isFinite(value) ? value : null
+    }
+
+    function isPositive(value) {
+      return typeof value === 'number' && Number.isInteger(value) && value > 0
+    }
+
+    function capacityError(draft) {
+      if (isPositive(draft?.contextWindow) && isPositive(draft?.maxTokens)) return ''
+      return '上下文和 maxTokens 都要填大于 0 的整数。'
+    }
+
     function DefaultsForm({ defaults, busy, onSave }) {
       const [draft, setDraft] = useState(defaults)
-      useEffect(() => { setDraft(defaults) }, [defaults])
+      const [error, setError] = useState('')
+      useEffect(() => { setDraft(defaults); setError('') }, [defaults])
       if (!draft) return null
       const defaultsLevels = Array.isArray(draft.thinkingLevels) ? draft.thinkingLevels : []
       const offOnly = defaultsLevels.length > 0 && defaultsLevels.every((level) => level === 'off')
+      const save = () => {
+        const message = capacityError(draft)
+        if (message) {
+          setError(message)
+          return
+        }
+        setError('')
+        onSave(draft)
+      }
       return h('div', { className: 'mdc-item' },
         h('div', { className: 'mdc-block-title' }, '未匹配时的默认值'),
         h('div', { className: 'mdc-grid' },
@@ -324,7 +349,7 @@ window.__ModuleLoader__.load({
             type: 'number',
             min: 1,
             value: draft.contextWindow ?? '',
-            onChange: (event) => setDraft({ ...draft, contextWindow: Number(event.target.value) }),
+            onChange: (event) => setDraft({ ...draft, contextWindow: readNumber(event.target.value) }),
           }),
           h('div', { className: 'mdc-label' }, 'maxTokens'),
           h('input', {
@@ -332,7 +357,7 @@ window.__ModuleLoader__.load({
             type: 'number',
             min: 1,
             value: draft.maxTokens ?? '',
-            onChange: (event) => setDraft({ ...draft, maxTokens: Number(event.target.value) }),
+            onChange: (event) => setDraft({ ...draft, maxTokens: readNumber(event.target.value) }),
           }),
         ),
         h('label', { className: 'mdc-toggle' },
@@ -373,12 +398,13 @@ window.__ModuleLoader__.load({
         h('div', { className: 'mdc-desc' },
           '默认档位写进供应商的 reasoning —— 该供应商新对话的默认思考强度。供应商下各模型的档位经常不一致，而写进去的档位会被每个模型拿来用，模型不支持就直接报错；所以默认只在全部模型都支持时才写（想强行写就取消勾选「严格」）。',
         ),
+        error ? h('div', { className: 'mdc-desc mdc-error' }, error) : null,
         h('div', { className: 'mdc-actions' },
           h('button', {
             className: 'mdc-btn mdc-btn-inline',
             type: 'button',
             disabled: busy,
-            onClick: () => onSave(draft),
+            onClick: save,
           }, busy ? '保存中…' : '保存默认'),
         ),
       )
@@ -386,12 +412,18 @@ window.__ModuleLoader__.load({
 
     function UnmatchedRow({ item, kind, fallbackLevels, busy, onSave }) {
       const declared = Array.isArray(item.thinkingLevels) && item.thinkingLevels.length > 0
+      const reasoningNone = item.reasoningNone === true
       const fallback = Array.isArray(fallbackLevels) ? fallbackLevels : []
-      // 未匹配百科的模型沿用「未匹配默认值」的档位；百科命中但没写档位的模型不预勾任何档位。
+      // 未匹配且还没声明档位时，沿用「未匹配默认值」。false 是「不会思考」，不是没写。
+      // 百科命中但没写档位、以及同名记录对不上的模型，都不预勾档位。
       const initial = {
         ...item,
-        thinkingLevels: declared ? item.thinkingLevels : kind === 'unmatched' ? fallback : [],
-        thinkingMode: kind === 'unmatched' || declared ? 'levels' : 'unset',
+        thinkingLevels: declared ? item.thinkingLevels : kind === 'unmatched' && !reasoningNone ? fallback : [],
+        thinkingMode: item.reasoningOmitted
+          ? 'unset'
+          : reasoningNone
+            ? 'none'
+            : kind === 'unmatched' || declared ? 'levels' : 'unset',
       }
       const [draft, setDraft] = useState(initial)
       const [error, setError] = useState('')
@@ -401,13 +433,27 @@ window.__ModuleLoader__.load({
       const mode = draft.thinkingMode === 'levels' || draft.thinkingMode === 'none' || draft.thinkingMode === 'unset'
         ? draft.thinkingMode
         : 'unset'
-      const save = () => {
+      // 选项里已经没有的档位不能再带着提交，否则会写进整个供应商。
+      const providerReasoning = mode === 'levels' && thinking.includes(draft.providerReasoning)
+        ? draft.providerReasoning
+        : null
+      const payload = () => ({ ...draft, thinkingMode: mode, providerReasoning })
+      const reject = () => {
+        const numbers = capacityError(draft)
+        if (numbers) return numbers
         if (mode === 'levels' && thinking.length === 0) {
-          setError('「指定档位」至少要勾一个 off 以外的档位；只声明不会思考请选「不会思考」。')
+          return '「指定档位」至少要勾一个 off 以外的档位；只声明不会思考请选「不会思考」。'
+        }
+        return ''
+      }
+      const save = () => {
+        const message = reject()
+        if (message) {
+          setError(message)
           return
         }
         setError('')
-        onSave({ ...draft, thinkingMode: mode })
+        onSave(payload())
       }
       const keepingLegacy = kind === 'legacy' && mode === 'levels' && isLegacyLevelSet(levels)
       const confirmLabel = mode === 'none'
@@ -418,16 +464,22 @@ window.__ModuleLoader__.load({
             ? '确认保留'
             : '确认档位'
       const confirm = () => {
-        if (mode === 'levels' && thinking.length === 0) {
-          setError('「指定档位」至少要勾一个 off 以外的档位；只声明不会思考请选「不会思考」。')
+        const message = reject()
+        if (message) {
+          setError(message)
           return
         }
         setError('')
-        onSave({ ...draft, thinkingMode: mode, confirmLegacy: keepingLegacy })
+        onSave({ ...payload(), confirmLegacy: keepingLegacy })
       }
       const clearLegacy = () => {
+        const numbers = capacityError(draft)
+        if (numbers) {
+          setError(numbers)
+          return
+        }
         setError('')
-        onSave({ ...draft, thinkingMode: 'unset' })
+        onSave({ ...payload(), thinkingMode: 'unset', providerReasoning: null })
       }
       return h('div', { className: 'mdc-item' },
         h('div', { className: 'mdc-item-head' },
@@ -442,7 +494,7 @@ window.__ModuleLoader__.load({
             type: 'number',
             min: 1,
             value: draft.contextWindow ?? '',
-            onChange: (event) => setDraft({ ...draft, contextWindow: Number(event.target.value) }),
+            onChange: (event) => setDraft({ ...draft, contextWindow: readNumber(event.target.value) }),
           }),
           h('div', { className: 'mdc-label' }, 'maxTokens'),
           h('input', {
@@ -450,7 +502,7 @@ window.__ModuleLoader__.load({
             type: 'number',
             min: 1,
             value: draft.maxTokens ?? '',
-            onChange: (event) => setDraft({ ...draft, maxTokens: Number(event.target.value) }),
+            onChange: (event) => setDraft({ ...draft, maxTokens: readNumber(event.target.value) }),
           }),
         ),
         h('label', { className: 'mdc-toggle' },
@@ -473,6 +525,8 @@ window.__ModuleLoader__.load({
             h('option', { value: 'levels' }, '指定档位'),
           ),
         ),
+        mode === 'unset' ? h('div', { className: 'mdc-desc' }, '不写思考档位。自动补全不会再给这个模型补上。供应商上若还留着这个模型不支持的默认档，保存时会清掉。') : null,
+        mode === 'none' ? h('div', { className: 'mdc-desc' }, '声明为不会思考。供应商上若还留着这个模型不支持的默认档，保存时会清掉。') : null,
         mode === 'levels' ? h(LevelChecks, {
           value: levels,
           onChange: (thinkingLevels) => setDraft({ ...draft, thinkingLevels }),
@@ -481,7 +535,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'mdc-label' }, '默认档位'),
           h('select', {
             className: 'mdc-select',
-            value: draft.providerReasoning || '',
+            value: providerReasoning || '',
             onChange: (event) => setDraft({ ...draft, providerReasoning: event.target.value || null }),
           },
             h('option', { value: '' }, '不改'),
@@ -532,6 +586,7 @@ window.__ModuleLoader__.load({
         modelCount: 0,
         autoFill: true,
         unmatched: [],
+        conflicts: [],
         thinkingGaps: [],
         legacyThinking: [],
         reasoning: [],
@@ -542,14 +597,21 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState('')
       const [hint, setHint] = useState('')
       const unmatched = Array.isArray(state.unmatched) ? state.unmatched : []
+      const conflicts = Array.isArray(state.conflicts) ? state.conflicts : []
       const thinkingGaps = Array.isArray(state.thinkingGaps) ? state.thinkingGaps : []
       const legacyThinking = Array.isArray(state.legacyThinking) ? state.legacyThinking : []
       const reasoning = Array.isArray(state.reasoning) ? state.reasoning : []
       const togglePanel = (next) => setPanel((current) => current === next ? null : next)
       const showDetail = panel === 'detail'
+      const showConflicts = (showDetail || panel === 'conflict') && conflicts.length > 0
       const showGaps = (showDetail || panel === 'gap') && thinkingGaps.length > 0
       const showLegacy = (showDetail || panel === 'legacy') && legacyThinking.length > 0
       const showUnmatched = showDetail || panel === 'unmatched'
+      const savedModelHint = (draft) => (result) => (
+        result?.reasoningCleared
+          ? `已保存 ${draft.id}，并清掉了供应商默认档`
+          : `已保存 ${draft.id}`
+      )
 
       const load = useCallback(async () => {
         const next = await api('/status')
@@ -595,6 +657,12 @@ window.__ModuleLoader__.load({
                 label: `未匹配 ${unmatched.length}`,
                 active: panel === 'unmatched',
                 onClick: () => togglePanel('unmatched'),
+              }) : null,
+              conflicts.length ? h(StatusChip, {
+                label: `参数不一致 ${conflicts.length}`,
+                tone: 'warn',
+                active: panel === 'conflict',
+                onClick: () => togglePanel('conflict'),
               }) : null,
               thinkingGaps.length ? h(StatusChip, {
                 label: `档位未写明 ${thinkingGaps.length}`,
@@ -653,6 +721,22 @@ window.__ModuleLoader__.load({
                 `${row.displayName}：${reasoningRowText(row)}`,
               )),
           ) : null,
+          showConflicts ? h('div', { className: 'mdc-block-title' }, '同名参数不一致') : null,
+          showConflicts ? h('div', { className: 'mdc-desc' },
+            '百科里同一个模型有多条记录，上下文、输出上限或思考档位并不相同。对不上的字段不会抄第一条，留在这里手填。',
+          ) : null,
+          showConflicts ? conflicts.map((item) => h(UnmatchedRow, {
+            key: `conflict:${item.provider}/${item.id}`,
+            item,
+            kind: 'conflict',
+            fallbackLevels: state.defaults?.thinkingLevels,
+            busy: busy === `model:${item.provider}/${item.id}`,
+            onSave: (draft) => run(
+              `model:${draft.provider}/${draft.id}`,
+              () => post('/model', draft),
+              savedModelHint(draft),
+            ),
+          })) : null,
           showGaps ? h('div', { className: 'mdc-block-title' }, '档位未写明') : null,
           showGaps ? h('div', { className: 'mdc-desc' },
             '百科标明这些模型会思考，但没有写出 DSH 能用的离散档位（只有开关、token 预算、只写了会思考，或档位名 DSH 不认）。插件不会代填 minimal / low / medium / high，保持「保持未声明」保存就不会替它们声明任何档位。',
@@ -666,7 +750,7 @@ window.__ModuleLoader__.load({
             onSave: (draft) => run(
               `model:${draft.provider}/${draft.id}`,
               () => post('/model', draft),
-              `已保存 ${draft.id}`,
+              savedModelHint(draft),
             ),
           })) : null,
           showLegacy ? h('div', { className: 'mdc-block-title' }, '疑似旧版本代填，请确认') : null,
@@ -689,8 +773,13 @@ window.__ModuleLoader__.load({
                   throw new Error(`确认没有写上，${draft.id} 还在待确认里。重启 DSH 后再试一次。`)
                 }
                 if (draft.confirmLegacy) return `已确认保留 ${draft.id}`
-                if (draft.thinkingMode === 'unset') return `已清掉 ${draft.id} 的档位`
-                return `已保存 ${draft.id}`
+                const saved = savedModelHint(draft)(result)
+                if (draft.thinkingMode === 'unset') {
+                  return result?.reasoningCleared
+                    ? `已清掉 ${draft.id} 的档位，并清掉了供应商默认档`
+                    : `已清掉 ${draft.id} 的档位`
+                }
+                return saved
               },
             ),
           })) : null,
@@ -709,7 +798,7 @@ window.__ModuleLoader__.load({
             onSave: (draft) => run(
               `model:${draft.provider}/${draft.id}`,
               () => post('/model', draft),
-              `已保存 ${draft.id}`,
+              savedModelHint(draft),
             ),
           })) : null,
         ) : null,
@@ -724,14 +813,17 @@ window.__ModuleLoader__.load({
       const [hint, setHint] = useState('')
       const [unmatched, setUnmatched] = useState(0)
       const [gaps, setGaps] = useState(0)
+      const [conflicts, setConflicts] = useState(0)
 
       useEffect(() => {
         if (!provider) return
         api('/status').then((data) => {
           const list = Array.isArray(data.unmatched) ? data.unmatched : []
           const gapList = Array.isArray(data.thinkingGaps) ? data.thinkingGaps : []
+          const conflictList = Array.isArray(data.conflicts) ? data.conflicts : []
           setUnmatched(list.filter((item) => item.provider === provider).length)
           setGaps(gapList.filter((item) => item.provider === provider).length)
+          setConflicts(conflictList.filter((item) => item.provider === provider).length)
         }).catch(() => {})
       }, [provider, hint])
 
@@ -781,6 +873,10 @@ window.__ModuleLoader__.load({
             ? result.thinkingGaps.filter((item) => item.provider === provider).length
             : gaps
           setGaps(gapCount)
+          const conflictCount = Array.isArray(result.conflicts)
+            ? result.conflicts.filter((item) => item.provider === provider).length
+            : conflicts
+          setConflicts(conflictCount)
           const row = Array.isArray(result.reasoning)
             ? result.reasoning.find((item) => item.provider === provider)
             : null
@@ -809,6 +905,7 @@ window.__ModuleLoader__.load({
           disabled: busy,
           title: hint || [
             unmatched ? `${unmatched} 个模型未匹配百科` : '',
+            conflicts ? `${conflicts} 个模型的同名参数不一致` : '',
             gaps ? `${gaps} 个模型的思考档位百科未写明` : '',
           ].filter(Boolean).join('；') || '按模型名补全上下文、输出上限、思考档位和图片能力',
           onClick: fill,

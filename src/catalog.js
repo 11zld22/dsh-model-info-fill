@@ -51,6 +51,7 @@ export function emptyCatalogFile() {
     defaults: emptyDefaults(),
     models: [],
     confirmedLegacy: [],
+    omittedReasoning: [],
   }
 }
 
@@ -121,16 +122,19 @@ export function planProviderReasoning(profile, nextModels, configured, strict = 
  * @param defaults - the plugin's saved defaults.
  * @returns one row per provider that declares models.
  */
-export function listProviderReasoning(config, models, defaults = emptyDefaults()) {
+export function listProviderReasoning(config, models, defaults = emptyDefaults(), omitted = []) {
   const providers = asRecord(config?.providers)
   if (!providers) return []
   const fallback = parseDefaults(defaults)
+  const omittedKeys = new Set(parseConfirmedLegacy(omitted))
   const rows = []
   for (const [key, raw] of Object.entries(providers)) {
     if (!isProviderKey(key)) continue
     const profile = asRecord(raw)
     if (!profile || !Array.isArray(profile.models) || profile.models.length === 0) continue
-    const nextModels = profile.models.map((entry) => fillModelEntry(entry, models, fallback).model)
+    const nextModels = profile.models.map((entry) => fillModelEntry(entry, models, fallback, {
+      omitReasoning: omittedKeys.has(legacyConfirmKey(key, entry?.id)),
+    }).model)
     const plan = planProviderReasoning(profile, nextModels, fallback.providerReasoning, fallback.providerReasoningStrict)
     const displayName = typeof profile.displayName === 'string' && profile.displayName.trim()
       ? profile.displayName.trim()
@@ -288,14 +292,60 @@ function catalogKey(id) {
   return tail.split(':')[0].trim()
 }
 
-export function lookupCatalogModel(models, id) {
+function catalogCandidates(models, id) {
   const raw = String(id ?? '').trim().toLowerCase()
-  if (!raw) return undefined
-  const exact = models.find((item) => item.id.toLowerCase() === raw)
-  if (exact) return exact
+  if (!raw || !Array.isArray(models)) return []
+  const exact = models.filter((item) => item?.id?.toLowerCase() === raw)
+  if (exact.length > 0) return exact
   const key = catalogKey(raw)
-  if (!key) return undefined
-  return models.find((item) => catalogKey(item.id) === key)
+  if (!key) return []
+  return models.filter((item) => catalogKey(item?.id) === key)
+}
+
+function agreedField(rows, read) {
+  const first = JSON.stringify(read(rows[0]))
+  const conflict = rows.some((row) => JSON.stringify(read(row)) !== first)
+  return { value: read(rows[0]), conflict }
+}
+
+/**
+ * Catalog rows that share a model id.
+ *
+ * One row is returned as-is. Several rows are returned as-is only when every
+ * copy agrees on context, output, input, and thinking levels. When they
+ * disagree, the result is a single row whose conflicting fields are null and
+ * `ambiguous` is set, so a fill cannot copy the first gateway's numbers.
+ */
+export function lookupCatalogModel(models, id) {
+  const rows = catalogCandidates(models, id)
+  if (rows.length === 0) return undefined
+  if (rows.length === 1) return rows[0]
+  const context = agreedField(rows, (row) => row.contextWindow ?? null)
+  const output = agreedField(rows, (row) => row.maxOutput ?? null)
+  const input = agreedField(rows, (row) => row.input ?? null)
+  const thinking = agreedField(rows, (row) => row.thinkingLevels ?? null)
+  const gap = agreedField(rows, (row) => row.thinkingGap ?? null)
+  const name = agreedField(rows, (row) => row.name ?? null)
+  const conflicts = {
+    context: context.conflict,
+    output: output.conflict,
+    input: input.conflict,
+    thinking: thinking.conflict,
+  }
+  if (!conflicts.context && !conflicts.output && !conflicts.input && !conflicts.thinking) return rows[0]
+  return {
+    id: rows[0].id,
+    name: name.conflict ? undefined : name.value,
+    provider: '',
+    contextWindow: context.conflict ? null : context.value,
+    maxOutput: output.conflict ? null : output.value,
+    input: input.conflict ? null : input.value,
+    thinkingLevels: thinking.conflict ? null : thinking.value,
+    thinkingGap: thinking.conflict ? 'conflict' : gap.value,
+    ambiguous: true,
+    candidateCount: rows.length,
+    conflicts,
+  }
 }
 
 export function clonePlain(value) {
@@ -316,7 +366,7 @@ function missingReasoning(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0
 }
 
-export function fillModelEntry(entry, models, defaults = emptyDefaults()) {
+export function fillModelEntry(entry, models, defaults = emptyDefaults(), options = {}) {
   if (!entry || typeof entry !== 'object') return { model: entry, changed: false, matched: false }
   const id = typeof entry.id === 'string' ? entry.id.trim() : ''
   if (!id) return { model: entry, changed: false, matched: false }
@@ -328,23 +378,33 @@ export function fillModelEntry(entry, models, defaults = emptyDefaults()) {
   let changed = false
   const fallback = parseDefaults(defaults)
 
+  const conflicts = hit?.conflicts ?? {}
   if (missingCapacity(next.contextWindow)) {
-    next.contextWindow = hit?.contextWindow ?? fallback.contextWindow
-    changed = true
+    // Disagreeing copies: leave the field missing instead of copying one gateway.
+    if (!conflicts.context) {
+      next.contextWindow = hit?.contextWindow ?? fallback.contextWindow
+      changed = true
+    }
   }
   if (missingCapacity(next.maxTokens)) {
-    next.maxTokens = hit?.maxOutput ?? fallback.maxTokens
-    changed = true
+    if (!conflicts.output) {
+      next.maxTokens = hit?.maxOutput ?? fallback.maxTokens
+      changed = true
+    }
   }
   if (missingInput(next.input)) {
-    next.input = hit ? sanitizeInput(hit.input) : defaultsInput(fallback)
-    changed = true
+    if (!conflicts.input) {
+      next.input = hit ? sanitizeInput(hit.input) : defaultsInput(fallback)
+      changed = true
+    }
   }
   if (missingReasoning(next.reasoningEfforts)) {
     // A catalog hit that states no discrete level declares nothing, and an
     // off-only level set is invalid DSH config. Both leave the field unset: an
     // empty object would be refused, so drop it and let a missing field stay missing.
-    const value = hit && hit.thinkingLevels === null
+    // An explicit 「保持未声明」 is the same: do not invent the unmatched defaults.
+    const omit = options?.omitReasoning === true
+    const value = omit || (hit && hit.thinkingLevels === null)
       ? undefined
       : reasoningEffortsFromLevels(hit ? hit.thinkingLevels : fallback.thinkingLevels)
     if (value === undefined) {
@@ -397,14 +457,20 @@ function modelReport(item) {
     maxTokens: isPositiveInt(entry.maxTokens) ? entry.maxTokens : null,
     image: Array.isArray(entry.input) && entry.input.includes('image'),
     thinkingLevels: thinkingLevelsFromEfforts(entry.reasoningEfforts),
+    // false（不会思考）和没写字段在档位列表里都是空的，表单要能把两者分开。
+    reasoningNone: entry.reasoningEfforts === false,
     providerReasoning: THINKING_LEVELS.includes(item.providerReasoning) ? item.providerReasoning : null,
   }
 }
 
-export function listUnmatched(config, models) {
+export function listUnmatched(config, models, omitted = []) {
+  const omittedKeys = new Set(parseConfirmedLegacy(omitted))
   return configuredModels(config)
     .filter((item) => !lookupCatalogModel(models, item.id))
-    .map(modelReport)
+    .map((item) => ({
+      ...modelReport(item),
+      reasoningOmitted: omittedKeys.has(legacyConfirmKey(item.provider, item.id)),
+    }))
 }
 
 /**
@@ -453,6 +519,11 @@ export function rememberLegacyConfirmation(confirmed, provider, id) {
   return keys
 }
 
+export function forgetLegacyConfirmation(confirmed, provider, id) {
+  const key = legacyConfirmKey(provider, id)
+  return parseConfirmedLegacy(confirmed).filter((item) => item !== key)
+}
+
 export function isLegacyLevelSelection(levels) {
   return isLegacyFabricatedEfforts(reasoningEffortsFromLevels(levels))
 }
@@ -470,7 +541,7 @@ export function listLegacyThinkingGuesses(config, models, confirmed = []) {
   const guesses = []
   for (const item of configuredModels(config)) {
     const hit = lookupCatalogModel(models, item.id)
-    if (!hit || hit.thinkingLevels !== null) continue
+    if (!hit || hit.ambiguous || hit.thinkingLevels !== null) continue
     if (!isLegacyFabricatedEfforts(item.entry.reasoningEfforts)) continue
     if (accepted.has(legacyConfirmKey(item.provider, item.id))) continue
     guesses.push({ ...modelReport(item), note: LEGACY_GUESS_NOTE })
@@ -482,7 +553,7 @@ export function listThinkingGaps(config, models) {
   const gaps = []
   for (const item of configuredModels(config)) {
     const hit = lookupCatalogModel(models, item.id)
-    if (!hit || hit.thinkingLevels !== null) continue
+    if (!hit || hit.ambiguous || hit.thinkingLevels !== null) continue
     if (!missingReasoning(item.entry.reasoningEfforts)) continue
     gaps.push({
       ...modelReport(item),
@@ -493,16 +564,50 @@ export function listThinkingGaps(config, models) {
   return gaps
 }
 
+/**
+ * Models whose catalog copies disagree on a field that is still empty.
+ * Already-filled fields are left alone, so a disagreement only shows up when
+ * auto-fill would otherwise have copied one gateway's numbers.
+ */
+export function listCatalogConflicts(config, models) {
+  const rows = []
+  for (const item of configuredModels(config)) {
+    const hit = lookupCatalogModel(models, item.id)
+    if (!hit?.ambiguous || !hit.conflicts) continue
+    const entry = item.entry
+    const missing = []
+    if (hit.conflicts.context && missingCapacity(entry.contextWindow)) missing.push('上下文')
+    if (hit.conflicts.output && missingCapacity(entry.maxTokens)) missing.push('maxTokens')
+    if (hit.conflicts.input && missingInput(entry.input)) missing.push('图片能力')
+    if (hit.conflicts.thinking && missingReasoning(entry.reasoningEfforts)) missing.push('思考档位')
+    if (missing.length === 0) continue
+    const count = hit.candidateCount > 0 ? hit.candidateCount : '多'
+    rows.push({
+      ...modelReport(item),
+      note: `百科里有 ${count} 条同名记录，${missing.join('、')}对不上，所以这些字段没有自动填。`,
+    })
+  }
+  return rows
+}
+
+function applyCapacity(next, key, patchValue, fallback) {
+  if (isPositiveInt(patchValue)) {
+    next[key] = patchValue
+    return
+  }
+  // 0 / null is an emptied input, not a request to invent the default.
+  // Only an omitted patch fills a field that was already missing.
+  if (patchValue === undefined && missingCapacity(next[key])) next[key] = fallback
+}
+
 export function applyModelPatch(entry, patch, defaults = emptyDefaults(), models = []) {
   const fallback = parseDefaults(defaults)
   const next = clonePlain(entry)
   const id = typeof next.id === 'string' ? next.id.trim() : ''
   if (!id) return next
   next.id = id
-  if (isPositiveInt(patch.contextWindow)) next.contextWindow = patch.contextWindow
-  else if (missingCapacity(next.contextWindow)) next.contextWindow = fallback.contextWindow
-  if (isPositiveInt(patch.maxTokens)) next.maxTokens = patch.maxTokens
-  else if (missingCapacity(next.maxTokens)) next.maxTokens = fallback.maxTokens
+  applyCapacity(next, 'contextWindow', patch.contextWindow, fallback.contextWindow)
+  applyCapacity(next, 'maxTokens', patch.maxTokens, fallback.maxTokens)
   if (typeof patch.image === 'boolean') next.input = patch.image ? ['text', 'image'] : ['text']
   else if (missingInput(next.input)) next.input = defaultsInput(fallback)
   const mode = typeof patch.thinkingMode === 'string' ? patch.thinkingMode : ''
@@ -535,11 +640,12 @@ export function applyModelPatch(entry, patch, defaults = emptyDefaults(), models
   return next
 }
 
-export function buildFillOps(config, models, onlyProvider, defaults = emptyDefaults()) {
+export function buildFillOps(config, models, onlyProvider, defaults = emptyDefaults(), omitted = []) {
   const providers = asRecord(config?.providers)
   if (!providers) return { ops: [], filledProviders: [], reasoning: [] }
 
   const fallback = parseDefaults(defaults)
+  const omittedKeys = new Set(parseConfirmedLegacy(omitted))
   const ops = []
   const filledProviders = []
   const reasoning = []
@@ -554,7 +660,9 @@ export function buildFillOps(config, models, onlyProvider, defaults = emptyDefau
 
     let changed = false
     const nextModels = list.map((entry) => {
-      const result = fillModelEntry(entry, models, fallback)
+      const result = fillModelEntry(entry, models, fallback, {
+        omitReasoning: omittedKeys.has(legacyConfirmKey(key, entry?.id)),
+      })
       if (result.changed) changed = true
       return result.model
     })
@@ -600,12 +708,24 @@ export function buildModelSaveOps(config, patch, defaults = emptyDefaults(), mod
     path: ['providers', provider, 'models'],
     value: nextModels,
   }]
-  const reasoning = typeof patch.providerReasoning === 'string' ? patch.providerReasoning.trim() : null
-  if (reasoning && THINKING_LEVELS.includes(reasoning)) {
+  const supported = supportedThinkingLevels(nextModels[index])
+  const requested = typeof patch.providerReasoning === 'string' ? patch.providerReasoning.trim() : ''
+  const declared = typeof profile?.reasoning === 'string' ? profile.reasoning.trim() : ''
+  const current = THINKING_LEVELS.includes(declared) ? declared : null
+  // A stale select can still send the previous default after that level was
+  // unchecked. Never write a provider default the model itself does not offer.
+  if (requested && THINKING_LEVELS.includes(requested) && supported.includes(requested)) {
     ops.push({
       op: 'set',
       path: ['providers', provider, 'reasoning'],
-      value: reasoning,
+      value: requested,
+    })
+  } else if (current && !supported.includes(current)) {
+    // 保持未声明 / 不会思考会拿掉模型上的档位，但供应商默认档还在。
+    // pi-ai 会把那个默认档带给这个模型，模型不支持就直接报错，所以这里清掉。
+    ops.push({
+      op: 'unset',
+      path: ['providers', provider, 'reasoning'],
     })
   }
   return ops
@@ -627,6 +747,7 @@ export function parseCatalogFile(raw) {
     defaults: parseDefaults(record.defaults),
     models,
     confirmedLegacy: parseConfirmedLegacy(record.confirmedLegacy),
+    omittedReasoning: parseConfirmedLegacy(record.omittedReasoning),
   }
 }
 

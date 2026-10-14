@@ -7,11 +7,13 @@ import {
   CATALOG_VERSION,
   applyModelPatch,
   buildFillOps,
+  buildModelSaveOps,
   catalogIsStale,
   fillModelEntry,
   formatCatalogStamp,
   isLegacyFabricatedEfforts,
   isLegacyLevelSelection,
+  listCatalogConflicts,
   listLegacyThinkingGuesses,
   listProviderReasoning,
   listThinkingGaps,
@@ -408,6 +410,34 @@ test('listUnmatched only returns ids absent from catalog', () => {
   assert.equal(unmatched[0].id, 'mystery')
   assert.equal(unmatched[0].image, true)
   assert.equal(unmatched[0].providerReasoning, 'high')
+  assert.equal(unmatched[0].reasoningOmitted, false)
+  const omitted = listUnmatched({
+    providers: { custom: { models: [{ id: 'mystery' }] } },
+  }, models, ['custom\nmystery'])
+  assert.equal(omitted[0].reasoningOmitted, true)
+})
+
+test('fillModelEntry leaves reasoning unset when the user chose not to declare it', () => {
+  const { model } = fillModelEntry(
+    { id: 'totally-unknown-x' },
+    [],
+    { thinkingLevels: ['off', 'low', 'high'] },
+    { omitReasoning: true },
+  )
+  assert.equal(model.contextWindow, DEFAULT_CONTEXT_WINDOW)
+  assert.equal(Object.hasOwn(model, 'reasoningEfforts'), false)
+})
+
+test('buildFillOps does not put default thinking levels back on an omitted model', () => {
+  const { ops } = buildFillOps(
+    { providers: { custom: { models: [{ id: 'unknown-x' }] } } },
+    [],
+    undefined,
+    { thinkingLevels: ['off', 'low', 'high'] },
+    ['custom\nunknown-x'],
+  )
+  const models = ops.find((op) => op.path.at(-1) === 'models')
+  assert.equal(Object.hasOwn(models.value[0], 'reasoningEfforts'), false)
 })
 
 test('parseDefaults keeps the built-in default level and honours 不改', () => {
@@ -661,5 +691,210 @@ test('applyModelPatch does not invent levels for a level-less catalog hit', () =
   assert.equal(Object.hasOwn(patched, 'reasoningEfforts'), false)
   const unmatched = applyModelPatch({ id: 'not-in-catalog' }, {}, { thinkingLevels: ['off', 'low', 'high'] }, models)
   assert.deepEqual(unmatched.reasoningEfforts, { off: null, low: 'low', high: 'high' })
+})
+
+const SPLIT = {
+  alpha: {
+    id: 'alpha',
+    name: 'Alpha',
+    models: {
+      'glm-5.2': {
+        id: 'glm-5.2',
+        name: 'GLM-5.2',
+        limit: { context: 1000000, output: 131072 },
+        modalities: { input: ['text'] },
+        reasoning: true,
+        reasoning_options: [{ type: 'effort', values: ['low', 'high'] }],
+      },
+    },
+  },
+  beta: {
+    id: 'beta',
+    name: 'Beta',
+    models: {
+      'glm-5.2': {
+        id: 'glm-5.2',
+        name: 'GLM-5.2',
+        limit: { context: 1048576, output: 131072 },
+        modalities: { input: ['text'] },
+        reasoning: true,
+        reasoning_options: [{ type: 'effort', values: ['low', 'max'] }],
+      },
+    },
+  },
+}
+
+test('lookup does not copy the first row when same-id copies disagree', () => {
+  const models = parseModelsDev(SPLIT)
+  const hit = lookupCatalogModel(models, 'gateway/glm-5.2')
+  assert.equal(hit.ambiguous, true)
+  assert.equal(hit.candidateCount, 2)
+  assert.equal(hit.contextWindow, null)
+  assert.equal(hit.maxOutput, 131072)
+  assert.equal(hit.thinkingLevels, null)
+  assert.equal(hit.conflicts.context, true)
+  assert.equal(hit.conflicts.output, false)
+  assert.equal(hit.conflicts.thinking, true)
+})
+
+test('fill skips disagreeing catalog fields and keeps the ones every copy shares', () => {
+  const models = parseModelsDev(SPLIT)
+  const { model, changed, matched } = fillModelEntry({ id: 'glm-5.2' }, models, {
+    contextWindow: 111,
+    maxTokens: 222,
+    thinkingLevels: ['off', 'high'],
+  })
+  assert.equal(matched, true)
+  assert.equal(changed, true)
+  assert.equal(model.contextWindow, undefined)
+  assert.equal(model.maxTokens, 131072)
+  assert.equal(Object.hasOwn(model, 'reasoningEfforts'), false)
+})
+
+test('lookup returns one row when every copy agrees', () => {
+  const same = structuredClone(SPLIT)
+  same.beta.models['glm-5.2'].limit.context = 1000000
+  same.beta.models['glm-5.2'].reasoning_options = [{ type: 'effort', values: ['low', 'high'] }]
+  const models = parseModelsDev(same)
+  const hit = lookupCatalogModel(models, 'glm-5.2')
+  assert.equal(hit.ambiguous, undefined)
+  assert.equal(hit.contextWindow, 1000000)
+  const { model } = fillModelEntry({ id: 'glm-5.2' }, models)
+  assert.equal(model.contextWindow, 1000000)
+  assert.deepEqual(model.reasoningEfforts, { off: null, low: 'low', high: 'high' })
+})
+
+test('listCatalogConflicts only lists models that still lack a disagreeing field', () => {
+  const models = parseModelsDev(SPLIT)
+  const config = {
+    providers: {
+      custom: {
+        displayName: 'Custom',
+        models: [
+          { id: 'glm-5.2' },
+          {
+            id: 'glm-5.2',
+            contextWindow: 1048576,
+            maxTokens: 131072,
+            input: ['text'],
+            reasoningEfforts: { off: null, low: 'low' },
+          },
+        ],
+      },
+    },
+  }
+  const rows = listCatalogConflicts(config, models)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].id, 'glm-5.2')
+  assert.match(rows[0].note, /上下文/)
+  assert.match(rows[0].note, /思考档位/)
+  assert.equal(listThinkingGaps(config, models).some((item) => item.id === 'glm-5.2'), false)
+})
+
+test('listUnmatched tells false apart from a missing reasoning field', () => {
+  const rows = listUnmatched({
+    providers: {
+      custom: {
+        models: [
+          { id: 'silent', reasoningEfforts: false },
+          { id: 'blank' },
+        ],
+      },
+    },
+  }, [])
+  assert.equal(rows.find((item) => item.id === 'silent').reasoningNone, true)
+  assert.equal(rows.find((item) => item.id === 'blank').reasoningNone, false)
+})
+
+test('applyModelPatch does not turn a cleared number into the default', () => {
+  const kept = applyModelPatch(
+    { id: 'kept', contextWindow: 1000, maxTokens: 50 },
+    { contextWindow: 0, maxTokens: null },
+  )
+  assert.equal(kept.contextWindow, 1000)
+  assert.equal(kept.maxTokens, 50)
+  const cleared = applyModelPatch({ id: 'empty' }, { contextWindow: 0, maxTokens: 0 })
+  assert.equal(cleared.contextWindow, undefined)
+  assert.equal(cleared.maxTokens, undefined)
+  const omitted = applyModelPatch({ id: 'empty' }, {})
+  assert.equal(omitted.contextWindow, DEFAULT_CONTEXT_WINDOW)
+  assert.equal(omitted.maxTokens, DEFAULT_MAX_TOKENS)
+})
+
+test('buildModelSaveOps ignores a provider default the model does not offer', () => {
+  const config = {
+    providers: {
+      custom: {
+        reasoning: 'low',
+        models: [{
+          id: 'm',
+          contextWindow: 10,
+          maxTokens: 10,
+          input: ['text'],
+          reasoningEfforts: { off: null, low: 'low', high: 'high' },
+        }],
+      },
+    },
+  }
+  const dropped = buildModelSaveOps(config, {
+    provider: 'custom',
+    id: 'm',
+    contextWindow: 10,
+    maxTokens: 10,
+    image: false,
+    thinkingMode: 'levels',
+    thinkingLevels: ['off', 'low'],
+    providerReasoning: 'high',
+  })
+  assert.equal(dropped.some((op) => op.path.at(-1) === 'reasoning'), false)
+  assert.deepEqual(dropped[0].value[0].reasoningEfforts, { off: null, low: 'low' })
+  const kept = buildModelSaveOps(config, {
+    provider: 'custom',
+    id: 'm',
+    contextWindow: 10,
+    maxTokens: 10,
+    image: false,
+    thinkingMode: 'levels',
+    thinkingLevels: ['off', 'low', 'high'],
+    providerReasoning: 'high',
+  })
+  assert.equal(kept.find((op) => op.path.at(-1) === 'reasoning').value, 'high')
+})
+
+test('buildModelSaveOps clears a provider default the model no longer accepts', () => {
+  const config = {
+    providers: {
+      vcnovbgemini: {
+        reasoning: 'high',
+        models: [{
+          id: 'gemini-4-argon-high',
+          contextWindow: 1000000,
+          maxTokens: 128000,
+          input: ['text', 'image'],
+        }],
+      },
+    },
+  }
+  const patch = {
+    provider: 'vcnovbgemini',
+    id: 'gemini-4-argon-high',
+    contextWindow: 1000000,
+    maxTokens: 128000,
+    image: true,
+    providerReasoning: null,
+  }
+  const unset = buildModelSaveOps(config, { ...patch, thinkingMode: 'unset' })
+  assert.deepEqual(unset.find((op) => op.path.at(-1) === 'reasoning'), {
+    op: 'unset',
+    path: ['providers', 'vcnovbgemini', 'reasoning'],
+  })
+  const none = buildModelSaveOps(config, { ...patch, thinkingMode: 'none' })
+  assert.equal(none.find((op) => op.path.at(-1) === 'reasoning').op, 'unset')
+  const still = buildModelSaveOps(config, {
+    ...patch,
+    thinkingMode: 'levels',
+    thinkingLevels: ['off', 'low', 'high'],
+  })
+  assert.equal(still.some((op) => op.op === 'unset'), false)
 })
 

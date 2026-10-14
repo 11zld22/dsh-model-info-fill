@@ -9,13 +9,16 @@ import {
   catalogIsStale,
   CATALOG_VERSION,
   emptyCatalogFile,
+  forgetLegacyConfirmation,
   isLegacyLevelSelection,
+  listCatalogConflicts,
   listLegacyThinkingGuesses,
   listProviderReasoning,
   rememberLegacyConfirmation,
   listThinkingGaps,
   listUnmatched,
   parseCatalogFile,
+  parseConfirmedLegacy,
   parseDefaults,
   parseModelsDev,
 } from './catalog.js'
@@ -99,10 +102,11 @@ export function apply(ctx) {
     modelCount: store.file.models.length,
     autoFill: store.file.autoFill !== false,
     defaults: store.file.defaults,
-    unmatched: listUnmatched(currentConfig(), store.file.models),
+    unmatched: listUnmatched(currentConfig(), store.file.models, store.file.omittedReasoning),
+    conflicts: listCatalogConflicts(currentConfig(), store.file.models),
     thinkingGaps: listThinkingGaps(currentConfig(), store.file.models),
     legacyThinking: listLegacyThinkingGuesses(currentConfig(), store.file.models, store.file.confirmedLegacy),
-    reasoning: listProviderReasoning(currentConfig(), store.file.models, store.file.defaults),
+    reasoning: listProviderReasoning(currentConfig(), store.file.models, store.file.defaults, store.file.omittedReasoning),
     filling: store.filling,
     refreshing: store.refreshing,
   })
@@ -142,6 +146,7 @@ export function apply(ctx) {
         autoFill: store.file.autoFill !== false,
         defaults: parseDefaults(store.file.defaults),
         confirmedLegacy: store.file.confirmedLegacy ?? [],
+        omittedReasoning: store.file.omittedReasoning ?? [],
         models: parseModelsDev(data),
       }
       await persist()
@@ -160,7 +165,13 @@ export function apply(ctx) {
   const fillSettings = async (onlyProvider) => {
     const settings = ctx.settings
     const config = readConfig()
-    const { ops, filledProviders, reasoning } = buildFillOps(config, store.file.models, onlyProvider, store.file.defaults)
+    const { ops, filledProviders, reasoning } = buildFillOps(
+      config,
+      store.file.models,
+      onlyProvider,
+      store.file.defaults,
+      store.file.omittedReasoning,
+    )
     if (ops.length === 0) {
       return { ok: true, filled: 0, providers: [], reasoning, skipped: true }
     }
@@ -284,7 +295,19 @@ export function apply(ctx) {
         }
         const ops = buildModelSaveOps(readConfig(), body, store.file.defaults, store.file.models)
         await ctx.settings.mutate(LLM_PI_AI_NS, ops, llmRevision())
-        send(res, 200, status())
+        const reasoningCleared = ops.some((op) => op.op === 'unset' && op.path.at(-1) === 'reasoning')
+        const mode = typeof body.thinkingMode === 'string' ? body.thinkingMode : ''
+        if (mode === 'unset' || mode === 'levels' || mode === 'none') {
+          const current = store.file.omittedReasoning
+          const next = mode === 'unset'
+            ? rememberLegacyConfirmation(current, body.provider, body.id)
+            : forgetLegacyConfirmation(current, body.provider, body.id)
+          if (next.join('\0') !== parseConfirmedLegacy(current).join('\0')) {
+            store.file.omittedReasoning = next
+            await persist()
+          }
+        }
+        send(res, 200, { ...status(), reasoningCleared })
       })
     })
 
